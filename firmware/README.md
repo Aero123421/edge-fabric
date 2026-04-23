@@ -54,7 +54,8 @@ XIAO ESP32-S3 + SX1262 を想定する最短確認:
 
 backend の現状:
 
-- scaffold app は explicit に default development backend を install する
+- `gateway-head` は TinyUSB が有効な build では real backend prototype を優先し、初期化に失敗した場合は default development backend にフォールバックする
 - `usb_link_install_backend()` / `radio_hal_install_backend()` に実機 driver を差し替えられる
 - この repo の default backend は local handoff / poll seam の確認用で、実機 USB CDC / SX1262 完了通知はまだ未実装
 - `node-sdk` は synthetic pending digest / tiny command を 1 回返す development backend を持つ
+- `gateway-head` には TinyUSB CDC real backend と SX1262 SPI real backend の prototype 実装を追加済み

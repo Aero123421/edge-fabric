@@ -2,9 +2,13 @@ idf_component_register(
     SRCS
         "src/radio_hal_sx1262.c"
         "src/lora_jp_policy.c"
+        "src/radio_hal_real_sx1262.c"
+        "third_party/sx126x_driver/src/sx126x.c"
     INCLUDE_DIRS
         "include"
+        "third_party/sx126x_driver/src"
     REQUIRES
         board_xiao_sx1262
+        driver
         freertos
 )

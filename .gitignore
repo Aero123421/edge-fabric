@@ -11,6 +11,7 @@ dist/
 build/
 *.egg-info/
 .tools/
+.tmp/
 bin/
 coverage.out
 *.spool*.jsonl

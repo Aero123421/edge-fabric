@@ -1,7 +1,9 @@
 #include "fabric_proto/fabric_proto.h"
 #include "gateway_head_backends.h"
 #include "radio_hal_sx1262.h"
+#include "radio_hal_real_sx1262.h"
 #include "usb_link.h"
+#include "usb_tinyusb_backend.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -43,10 +45,17 @@ esp_err_t gateway_head_runtime_use_default_backends(void) {
     return gateway_head_runtime_set_default_backends(true);
 }
 
+esp_err_t gateway_head_runtime_use_real_backends(void) {
+    ESP_RETURN_ON_ERROR(gateway_head_runtime_init_transport(), TAG, "transport init failed");
+    ESP_RETURN_ON_ERROR(usb_tinyusb_backend_install(), TAG, "tinyusb backend install failed");
+    ESP_RETURN_ON_ERROR(radio_hal_install_real_sx1262_backend(), TAG, "sx1262 real backend install failed");
+    return gateway_head_runtime_set_default_backends(false);
+}
+
 esp_err_t gateway_head_runtime_start(void) {
     static const radio_hal_lora_profile_t gateway_profile = {
         .frequency_hz = 922400000u,
-        .spreading_factor = 9u,
+        .spreading_factor = 10u,
         .bandwidth_khz = 125u,
         .tx_power_dbm = 10u,
     };
@@ -201,21 +210,17 @@ static bool gateway_payload_is_json_object(const uint8_t *payload, size_t payloa
 }
 
 static uint8_t gateway_classify_radio_frame_type(const radio_hal_frame_t *frame) {
-    static const char compact_prefixes[] = {'S', 'E', 'R', 'C', 'D', 'P', 'H'};
-    size_t index;
     if (frame == NULL || frame->payload_len == 0u) {
         return EF_USB_FRAME_SUMMARY_BINARY;
     }
     if (gateway_payload_is_json_object(frame->payload, frame->payload_len)) {
         return EF_USB_FRAME_ENVELOPE_JSON;
     }
-    if (memchr(frame->payload, '|', frame->payload_len) == NULL) {
-        return EF_USB_FRAME_SUMMARY_BINARY;
-    }
-    for (index = 0; index < sizeof(compact_prefixes) / sizeof(compact_prefixes[0]); ++index) {
-        if (frame->payload[0] == (uint8_t)compact_prefixes[index]) {
-            return EF_USB_FRAME_COMPACT_BINARY;
-        }
+    if (frame->payload_len >= 2u &&
+        frame->payload[1] == '|' &&
+        frame->payload[0] >= 'A' &&
+        frame->payload[0] <= 'Z') {
+        return EF_USB_FRAME_COMPACT_BINARY;
     }
     return EF_USB_FRAME_SUMMARY_BINARY;
 }

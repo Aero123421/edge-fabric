@@ -157,14 +157,16 @@ esp_err_t usb_link_inject_rx_bytes(const uint8_t *data, size_t data_len) {
     size_t frame_len = 0u;
     bool frame_ready = false;
     size_t offset = 0u;
+    esp_err_t err = ESP_OK;
     if (!s_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
     if (data == NULL || data_len == 0u) {
         return ESP_ERR_INVALID_ARG;
     }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     while (offset < data_len) {
-        const esp_err_t err = ef_usb_parser_push(
+        err = ef_usb_parser_push(
             &s_parser,
             &data[offset],
             1u,
@@ -174,18 +176,40 @@ esp_err_t usb_link_inject_rx_bytes(const uint8_t *data, size_t data_len) {
             &frame_ready);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "parser error, resyncing");
-            ESP_ERROR_CHECK(ef_usb_parser_reset(&s_parser));
+            err = ef_usb_parser_reset(&s_parser);
+            if (err != ESP_OK) {
+                break;
+            }
             offset++;
             continue;
         }
         if (frame_ready) {
-            ESP_RETURN_ON_ERROR(usb_link_queue_received_frame(frame_buf, frame_len), TAG, "enqueue rx failed");
+            err = usb_link_queue_received_frame(frame_buf, frame_len);
+            if (err != ESP_OK) {
+                break;
+            }
             frame_ready = false;
             frame_len = 0u;
         }
         offset++;
     }
+    xSemaphoreGive(s_lock);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "USB RX inject failed: %s", esp_err_to_name(err));
+        return err;
+    }
     return ESP_OK;
+}
+
+esp_err_t usb_link_reset_parser(void) {
+    esp_err_t err;
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    err = ef_usb_parser_reset(&s_parser);
+    xSemaphoreGive(s_lock);
+    return err;
 }
 
 esp_err_t usb_link_get_last_tx_frame(uint8_t *frame_buf, size_t frame_buf_cap, size_t *frame_len) {

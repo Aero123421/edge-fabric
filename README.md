@@ -115,6 +115,13 @@ python .\scripts\simulate_direct_slice.py
 - [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md)
 - Go / Python の demo と doctor
 
+この workspace で `ESP-IDF` が未導入な場合、まだできないこと:
+
+- `idf.py build`
+- 実機 flash / monitor
+- TinyUSB / SX1262 real backend の compile 確認
+- 実機 HIL
+
 `ESP-IDF` が入っている環境では、各 app ディレクトリで次を実行します。
 
 [要: ESP-IDF環境]

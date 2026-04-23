@@ -29,6 +29,7 @@ esp_err_t usb_link_set_tx_sink(usb_link_tx_sink_t sink, void *context);
 esp_err_t usb_link_send_frame(const uint8_t *frame, size_t frame_len);
 esp_err_t usb_link_receive_frame(uint8_t *frame_buf, size_t frame_buf_cap, size_t *frame_len, uint32_t timeout_ms);
 esp_err_t usb_link_inject_rx_bytes(const uint8_t *data, size_t data_len);
+esp_err_t usb_link_reset_parser(void);
 esp_err_t usb_link_get_last_tx_frame(uint8_t *frame_buf, size_t frame_buf_cap, size_t *frame_len);
 esp_err_t usb_link_service(void);
 bool usb_link_has_delivery_path(void);

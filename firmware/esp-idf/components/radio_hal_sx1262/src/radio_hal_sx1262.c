@@ -200,7 +200,7 @@ esp_err_t radio_hal_inject_rx_frame(const uint8_t *payload, size_t payload_len, 
     item.frame.payload_len = payload_len;
     item.frame.rssi_dbm = rssi_dbm;
     item.frame.snr_db = snr_db;
-    if (xQueueSend(s_rx_queue, &item, 0) != pdTRUE) {
+    if (xQueueSend(s_rx_queue, &item, pdMS_TO_TICKS(10u)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
@@ -261,7 +261,7 @@ esp_err_t radio_hal_service(void) {
         if (item.frame.payload_len == 0u) {
             return ESP_OK;
         }
-        if (xQueueSend(s_rx_queue, &item, 0) != pdTRUE) {
+        if (xQueueSend(s_rx_queue, &item, pdMS_TO_TICKS(10u)) != pdTRUE) {
             return ESP_ERR_TIMEOUT;
         }
     }
