@@ -175,8 +175,9 @@ func (e *Envelope) Validate() error {
 		return NewValidationError("command.command_id is required")
 	}
 	if e.Kind == "command_result" && e.CommandID == "" {
-		if value, ok := e.Payload["command_id"].(string); !ok || value == "" {
-			return NewValidationError("command_result.command_id is required")
+		if value, ok := e.Payload["command_id"].(string); ok && value != "" {
+		} else if _, ok := e.Payload["command_token"]; !ok {
+			return NewValidationError("command_result.command_id or payload.command_token is required")
 		}
 	}
 	if e.Kind == "file_chunk" {

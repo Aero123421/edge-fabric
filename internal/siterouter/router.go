@@ -6,11 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 
+	"github.com/Aero123421/edge-fabric/internal/protocol/jp"
+	"github.com/Aero123421/edge-fabric/internal/protocol/onair"
 	"github.com/Aero123421/edge-fabric/pkg/contracts"
 )
 
@@ -46,6 +50,12 @@ type PendingCommand struct {
 	CreatedAt  string              `json:"created_at"`
 	Status     string              `json:"status"`
 	LeaseUntil string              `json:"lease_until,omitempty"`
+}
+
+type NodeRuntimeInfo struct {
+	HardwareID string              `json:"hardware_id"`
+	Manifest   *contracts.Manifest `json:"manifest,omitempty"`
+	Lease      *contracts.Lease    `json:"lease,omitempty"`
 }
 
 type Router struct {
@@ -151,11 +161,13 @@ func (r *Router) init(ctx context.Context) error {
 		);`,
 		`CREATE TABLE IF NOT EXISTS command_ledger (
 			command_id TEXT PRIMARY KEY,
+			command_token INTEGER,
 			message_id TEXT NOT NULL UNIQUE,
 			state TEXT NOT NULL,
 			envelope_json TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_ledger_command_token ON command_ledger(command_token) WHERE command_token IS NOT NULL;`,
 		`CREATE TABLE IF NOT EXISTS command_execution (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			command_id TEXT NOT NULL,
@@ -181,6 +193,26 @@ func (r *Router) init(ctx context.Context) error {
 			updated_at TEXT NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_outbox_status_priority_created ON outbox_queue(status, priority, created_at);`,
+		`CREATE TABLE IF NOT EXISTS node_manifest (
+			hardware_id TEXT PRIMARY KEY,
+			power_class TEXT NOT NULL,
+			wake_class TEXT NOT NULL,
+			allowed_network_roles_json TEXT NOT NULL,
+			supported_bearers_json TEXT NOT NULL,
+			manifest_json TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS node_lease (
+			hardware_id TEXT PRIMARY KEY,
+			logical_binding_id TEXT NOT NULL,
+			fabric_short_id INTEGER,
+			effective_role TEXT NOT NULL,
+			primary_bearer TEXT NOT NULL,
+			fallback_bearer TEXT,
+			lease_json TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_node_lease_fabric_short_id ON node_lease(fabric_short_id) WHERE fabric_short_id IS NOT NULL;`,
 	}
 	for _, stmt := range stmts {
 		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
@@ -247,10 +279,11 @@ func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingre
 		}
 	case "command":
 		if envelope.CommandID != "" {
+			commandToken := payloadInt64(envelope.Payload, "command_token")
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO command_ledger (command_id, message_id, state, envelope_json, created_at)
-				VALUES (?, ?, ?, ?, ?)
-			`, envelope.CommandID, envelope.MessageID, "issued", string(rawEnvelope), persistedAt); err != nil {
+				INSERT INTO command_ledger (command_id, command_token, message_id, state, envelope_json, created_at)
+				VALUES (?, ?, ?, ?, ?, ?)
+			`, envelope.CommandID, nullableInt64(commandToken), envelope.MessageID, "issued", string(rawEnvelope), persistedAt); err != nil {
 				if isConstraintError(err) {
 					return r.ingestDuplicateAck(ctx, envelope)
 				}
@@ -259,6 +292,14 @@ func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingre
 		}
 	case "command_result":
 		if err := r.recordCommandResult(ctx, tx, envelope, persistedAt); err != nil {
+			return nil, err
+		}
+	case "manifest":
+		if err := r.upsertManifestEnvelope(ctx, tx, envelope, persistedAt); err != nil {
+			return nil, err
+		}
+	case "lease":
+		if err := r.upsertLeaseEnvelope(ctx, tx, envelope, persistedAt); err != nil {
 			return nil, err
 		}
 	}
@@ -370,18 +411,14 @@ func compareStateOrder(envelope *contracts.Envelope, occurredAt, sessionID strin
 	if leftOccurred.Before(rightOccurred) {
 		return -1
 	}
-	if envelope.Source.SessionID > sessionID {
-		return 1
-	}
-	if envelope.Source.SessionID < sessionID {
-		return -1
-	}
-	leftSeq := derefInt(envelope.Source.SeqLocal)
-	if leftSeq > seqLocal {
-		return 1
-	}
-	if leftSeq < seqLocal {
-		return -1
+	if envelope.Source.SessionID != "" && sessionID != "" && envelope.Source.SessionID == sessionID {
+		leftSeq := derefInt(envelope.Source.SeqLocal)
+		if leftSeq > seqLocal {
+			return 1
+		}
+		if leftSeq < seqLocal {
+			return -1
+		}
 	}
 	if envelope.MessageID > messageID {
 		return 1
@@ -400,7 +437,19 @@ func (r *Router) recordCommandResult(ctx context.Context, tx *sql.Tx, envelope *
 		}
 	}
 	if commandID == "" {
-		return nil
+		commandToken := payloadInt64(envelope.Payload, "command_token")
+		if commandToken != nil {
+			var resolved string
+			err := tx.QueryRowContext(ctx, `SELECT command_id FROM command_ledger WHERE command_token = ?`, *commandToken).Scan(&resolved)
+			if err == nil {
+				commandID = resolved
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+	}
+	if commandID == "" {
+		return contracts.NewValidationError("command_result.command_id or payload.command_token could not be resolved")
 	}
 	phase := "accepted"
 	if value, ok := envelope.Payload["phase"].(string); ok && value != "" {
@@ -415,6 +464,9 @@ func (r *Router) recordCommandResult(ctx context.Context, tx *sql.Tx, envelope *
 			return contracts.NewValidationError("command_result references unknown command_id: %s", commandID)
 		}
 		return err
+	}
+	if currentState == phase {
+		return nil
 	}
 	if !isValidCommandTransition(currentState, phase) {
 		return contracts.NewValidationError("invalid command transition: %s -> %s", currentState, phase)
@@ -438,6 +490,33 @@ func (r *Router) recordCommandResult(ctx context.Context, tx *sql.Tx, envelope *
 		return contracts.NewValidationError("command_result update did not match command_id: %s", commandID)
 	}
 	return nil
+}
+
+func (r *Router) upsertManifestEnvelope(ctx context.Context, tx *sql.Tx, envelope *contracts.Envelope, updatedAt string) error {
+	raw, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	var manifest contracts.Manifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return err
+	}
+	if manifest.HardwareID == "" {
+		manifest.HardwareID = envelope.Source.HardwareID
+	}
+	return r.upsertManifestTx(ctx, tx, manifest.HardwareID, &manifest, updatedAt)
+}
+
+func (r *Router) upsertLeaseEnvelope(ctx context.Context, tx *sql.Tx, envelope *contracts.Envelope, updatedAt string) error {
+	raw, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	var lease contracts.Lease
+	if err := json.Unmarshal(raw, &lease); err != nil {
+		return err
+	}
+	return r.upsertLeaseTx(ctx, tx, envelope.Target.Value, &lease, updatedAt)
 }
 
 func (r *Router) LatestState(ctx context.Context, hardwareID, stateKey string) (map[string]any, error) {
@@ -534,6 +613,90 @@ func (r *Router) CommandState(ctx context.Context, commandID string) (string, er
 	return state, err
 }
 
+func (r *Router) UpsertManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error {
+	if manifest == nil {
+		return errors.New("manifest is required")
+	}
+	if hardwareID == "" {
+		hardwareID = manifest.HardwareID
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := r.upsertManifestTx(ctx, tx, hardwareID, manifest, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (r *Router) UpsertLease(ctx context.Context, hardwareID string, lease *contracts.Lease) error {
+	if lease == nil {
+		return errors.New("lease is required")
+	}
+	if hardwareID == "" {
+		return errors.New("hardware_id is required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := r.upsertLeaseTx(ctx, tx, hardwareID, lease, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (r *Router) RuntimeInfoForNode(ctx context.Context, hardwareID string) (*NodeRuntimeInfo, error) {
+	info := &NodeRuntimeInfo{HardwareID: hardwareID}
+	if hardwareID == "" {
+		return info, nil
+	}
+	var manifestJSON string
+	err := r.db.QueryRowContext(ctx, `SELECT manifest_json FROM node_manifest WHERE hardware_id = ?`, hardwareID).Scan(&manifestJSON)
+	if err == nil {
+		var manifest contracts.Manifest
+		if err := json.Unmarshal([]byte(manifestJSON), &manifest); err != nil {
+			return nil, err
+		}
+		info.Manifest = &manifest
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	var leaseJSON string
+	err = r.db.QueryRowContext(ctx, `SELECT lease_json FROM node_lease WHERE hardware_id = ?`, hardwareID).Scan(&leaseJSON)
+	if err == nil {
+		var lease contracts.Lease
+		if err := json.Unmarshal([]byte(leaseJSON), &lease); err != nil {
+			return nil, err
+		}
+		info.Lease = &lease
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	return info, nil
+}
+
+func (r *Router) ResolveHardwareIDByShortID(ctx context.Context, shortID uint16) (string, error) {
+	var hardwareID string
+	err := r.db.QueryRowContext(ctx, `SELECT hardware_id FROM node_lease WHERE fabric_short_id = ?`, int(shortID)).Scan(&hardwareID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return hardwareID, err
+}
+
+func (r *Router) ResolveCommandIDByToken(ctx context.Context, token uint16) (string, error) {
+	var commandID string
+	err := r.db.QueryRowContext(ctx, `SELECT command_id FROM command_ledger WHERE command_token = ?`, int(token)).Scan(&commandID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return commandID, err
+}
+
 func (r *Router) IssueCommand(ctx context.Context, envelope *contracts.Envelope, ingressID, queueKey string) (*PersistAck, int64, error) {
 	if envelope.Kind != "command" {
 		return nil, 0, contracts.NewValidationError("IssueCommand requires kind=command")
@@ -556,8 +719,48 @@ func (r *Router) IssueCommand(ctx context.Context, envelope *contracts.Envelope,
 	return ack, queueID, nil
 }
 
+func (r *Router) validateOutboundEnvelope(ctx context.Context, envelope *contracts.Envelope) error {
+	if envelope == nil || envelope.Kind != "command" || envelope.Target.Kind != "node" {
+		return nil
+	}
+	info, err := r.RuntimeInfoForNode(ctx, envelope.Target.Value)
+	if err != nil {
+		return err
+	}
+	if info.Lease != nil && info.Manifest != nil {
+		if err := validateLeaseAgainstManifest(info.Lease, info.Manifest); err != nil {
+			return err
+		}
+	}
+	routeClass := ""
+	if envelope.Delivery != nil {
+		routeClass = envelope.Delivery.RouteClass
+	}
+	if routeClass == "" {
+		return nil
+	}
+	switch routeClass {
+	case "sleepy_tiny_control":
+		_, err := planSleepyCompactCommand(envelope, info)
+		return err
+	case "maintenance_sync":
+		if info.Lease == nil || info.Lease.EffectiveRole != "sleepy_leaf" {
+			return nil
+		}
+		if info.Manifest != nil && !manifestAllowsBearer(info.Manifest, "ble_maintenance") {
+			return contracts.NewValidationError("maintenance_sync requires maintenance bearer for target %s", envelope.Target.Value)
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
 func (r *Router) EnqueueOutbound(ctx context.Context, envelope *contracts.Envelope, queueKey string) (int64, error) {
 	if err := envelope.Validate(); err != nil {
+		return 0, err
+	}
+	if err := r.validateOutboundEnvelope(ctx, envelope); err != nil {
 		return 0, err
 	}
 	if queueKey == "" {
@@ -848,6 +1051,202 @@ func (r *Router) PendingCommandsForNode(ctx context.Context, targetHardwareID st
 	return items, rows.Err()
 }
 
+func (r *Router) upsertManifestTx(ctx context.Context, tx *sql.Tx, hardwareID string, manifest *contracts.Manifest, updatedAt string) error {
+	if manifest == nil {
+		return errors.New("manifest is required")
+	}
+	if hardwareID == "" {
+		return contracts.NewValidationError("manifest.hardware_id is required")
+	}
+	manifest.HardwareID = hardwareID
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	allowedRolesJSON, err := json.Marshal(manifest.AllowedNetworkRoles)
+	if err != nil {
+		return err
+	}
+	bearersJSON, err := json.Marshal(manifest.SupportedBearers)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO node_manifest (
+			hardware_id, power_class, wake_class, allowed_network_roles_json, supported_bearers_json, manifest_json, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(hardware_id) DO UPDATE SET
+			power_class = excluded.power_class,
+			wake_class = excluded.wake_class,
+			allowed_network_roles_json = excluded.allowed_network_roles_json,
+			supported_bearers_json = excluded.supported_bearers_json,
+			manifest_json = excluded.manifest_json,
+			updated_at = excluded.updated_at
+	`, hardwareID, manifest.PowerClass, manifest.WakeClass, string(allowedRolesJSON), string(bearersJSON), string(raw), updatedAt)
+	return err
+}
+
+func (r *Router) upsertLeaseTx(ctx context.Context, tx *sql.Tx, hardwareID string, lease *contracts.Lease, updatedAt string) error {
+	if lease == nil {
+		return errors.New("lease is required")
+	}
+	if hardwareID == "" {
+		return contracts.NewValidationError("lease target hardware_id is required")
+	}
+	manifest, err := r.manifestForNodeTx(ctx, tx, hardwareID)
+	if err != nil {
+		return err
+	}
+	if err := validateLeaseAgainstManifest(lease, manifest); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(lease)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO node_lease (
+			hardware_id, logical_binding_id, fabric_short_id, effective_role, primary_bearer, fallback_bearer, lease_json, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(hardware_id) DO UPDATE SET
+			logical_binding_id = excluded.logical_binding_id,
+			fabric_short_id = excluded.fabric_short_id,
+			effective_role = excluded.effective_role,
+			primary_bearer = excluded.primary_bearer,
+			fallback_bearer = excluded.fallback_bearer,
+			lease_json = excluded.lease_json,
+			updated_at = excluded.updated_at
+	`, hardwareID, lease.LogicalBindingID, nullableInt(lease.FabricShortID), lease.EffectiveRole, lease.PrimaryBearer, lease.FallbackBearer, string(raw), updatedAt)
+	return err
+}
+
+func (r *Router) manifestForNodeTx(ctx context.Context, tx *sql.Tx, hardwareID string) (*contracts.Manifest, error) {
+	var manifestJSON string
+	err := tx.QueryRowContext(ctx, `SELECT manifest_json FROM node_manifest WHERE hardware_id = ?`, hardwareID).Scan(&manifestJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var manifest contracts.Manifest
+	if err := json.Unmarshal([]byte(manifestJSON), &manifest); err != nil {
+		return nil, err
+	}
+	return &manifest, nil
+}
+
+func validateLeaseAgainstManifest(lease *contracts.Lease, manifest *contracts.Manifest) error {
+	if lease == nil {
+		return nil
+	}
+	if manifest == nil {
+		return nil
+	}
+	if len(manifest.AllowedNetworkRoles) > 0 && !containsString(manifest.AllowedNetworkRoles, lease.EffectiveRole) {
+		return contracts.NewValidationError("lease role %s is not allowed for hardware_id %s", lease.EffectiveRole, manifest.HardwareID)
+	}
+	if isSleepyPowerClass(manifest) && leaseRoleRequiresAlwaysOn(lease.EffectiveRole) {
+		return contracts.NewValidationError("sleepy/battery node %s must not take always-on role %s", manifest.HardwareID, lease.EffectiveRole)
+	}
+	return nil
+}
+
+func planSleepyCompactCommand(envelope *contracts.Envelope, info *NodeRuntimeInfo) ([]byte, error) {
+	if envelope == nil {
+		return nil, contracts.NewValidationError("command envelope is required")
+	}
+	if info == nil || info.Lease == nil {
+		return nil, contracts.NewValidationError("sleepy_tiny_control requires lease with fabric_short_id for target %s", envelope.Target.Value)
+	}
+	if info.Lease.FabricShortID == nil || *info.Lease.FabricShortID <= 0 {
+		return nil, contracts.NewValidationError("sleepy_tiny_control requires fabric_short_id for target %s", envelope.Target.Value)
+	}
+	if info.Lease.EffectiveRole != "sleepy_leaf" {
+		return nil, contracts.NewValidationError("sleepy_tiny_control targets must be sleepy_leaf, got %s", info.Lease.EffectiveRole)
+	}
+	commandToken := payloadInt64(envelope.Payload, "command_token")
+	if commandToken == nil || *commandToken <= 0 || *commandToken > 0xFFFF {
+		return nil, contracts.NewValidationError("sleepy_tiny_control requires command_token in payload")
+	}
+	var (
+		commandKind byte
+		argument    byte
+	)
+	commandName, _ := envelope.Payload["command_name"].(string)
+	switch commandName {
+	case "mode.set":
+		mode, _ := envelope.Payload["mode"].(string)
+		switch mode {
+		case "maintenance_awake":
+			commandKind = onair.CommandKindMaintenanceOn
+		case "deployed":
+			commandKind = onair.CommandKindMaintenanceOff
+		default:
+			return nil, contracts.NewValidationError("mode.set(%s) is not representable as sleepy_tiny_control", mode)
+		}
+	case "threshold.set":
+		value := payloadInt64(envelope.Payload, "value")
+		if value == nil || *value < 0 || *value > 0xFF {
+			return nil, contracts.NewValidationError("threshold.set requires uint8 value for sleepy_tiny_control")
+		}
+		commandKind = onair.CommandKindThresholdSet
+		argument = byte(*value)
+	case "quiet.set":
+		value := payloadInt64(envelope.Payload, "value")
+		if value == nil || *value < 0 || *value > 0xFF {
+			return nil, contracts.NewValidationError("quiet.set requires uint8 value for sleepy_tiny_control")
+		}
+		commandKind = onair.CommandKindQuietSet
+		argument = byte(*value)
+	case "alarm.clear":
+		commandKind = onair.CommandKindAlarmClear
+	case "sampling.set":
+		value := payloadInt64(envelope.Payload, "value")
+		if value == nil || *value < 0 || *value > 0xFF {
+			return nil, contracts.NewValidationError("sampling.set requires uint8 value for sleepy_tiny_control")
+		}
+		commandKind = onair.CommandKindSamplingSet
+		argument = byte(*value)
+	default:
+		return nil, contracts.NewValidationError("command %s is not representable as sleepy_tiny_control", commandName)
+	}
+	expiresInSec := byte(30)
+	if envelope.Delivery != nil && envelope.Delivery.ExpiresAt != "" {
+		if expiresAt, err := time.Parse(time.RFC3339Nano, envelope.Delivery.ExpiresAt); err == nil {
+			remaining := time.Until(expiresAt.UTC()).Seconds()
+			if remaining <= 0 {
+				expiresInSec = 0
+			} else if remaining < 255 {
+				expiresInSec = byte(remaining)
+			} else {
+				expiresInSec = 255
+			}
+		}
+	}
+	wire, err := onair.EncodeCompactCommand(uint16(*info.Lease.FabricShortID), false, onair.CompactCommandBody{
+		CommandToken: uint16(*commandToken),
+		CommandKind:  commandKind,
+		Argument:     argument,
+		ExpiresInSec: expiresInSec,
+	})
+	if err != nil {
+		return nil, err
+	}
+	profiles, err := jp.LoadProfileFile(jpProfilePath())
+	if err != nil {
+		return nil, err
+	}
+	totalCap, err := findJPProfileCap(profiles, "JP125_LONG_SF10")
+	if err != nil {
+		return nil, err
+	}
+	if len(wire) > totalCap {
+		return nil, contracts.NewValidationError("sleepy_tiny_control payload exceeds JP125_LONG_SF10 cap: %d > %d", len(wire), totalCap)
+	}
+	return wire, nil
+}
+
 func isValidCommandResultPhase(phase string) bool {
 	_, ok := validCommandResultPhases[phase]
 	return ok
@@ -864,6 +1263,92 @@ func isValidCommandTransition(currentState, nextState string) bool {
 
 func isConstraintError(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "constraint")
+}
+
+func payloadInt64(payload map[string]any, key string) *int64 {
+	if payload == nil {
+		return nil
+	}
+	switch value := payload[key].(type) {
+	case int:
+		result := int64(value)
+		return &result
+	case int32:
+		result := int64(value)
+		return &result
+	case int64:
+		result := value
+		return &result
+	case float64:
+		result := int64(value)
+		return &result
+	default:
+		return nil
+	}
+}
+
+func nullableInt64(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func manifestAllowsBearer(manifest *contracts.Manifest, bearer string) bool {
+	if manifest == nil {
+		return false
+	}
+	return containsString(manifest.SupportedBearers, bearer)
+}
+
+func isSleepyPowerClass(manifest *contracts.Manifest) bool {
+	if manifest == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(manifest.PowerClass), "battery") ||
+		strings.Contains(strings.ToLower(manifest.WakeClass), "sleep")
+}
+
+func jpProfilePath() string {
+	_, filename, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(filename), "..", "..", "contracts", "protocol", "jp-safe-profiles.json")
+}
+
+func findJPProfileCap(file *jp.ProfileFile, name string) (int, error) {
+	if file == nil {
+		return 0, errors.New("profile file is required")
+	}
+	for _, profile := range file.Profiles {
+		if profile.Name == name {
+			return profile.TotalPayloadCap, nil
+		}
+	}
+	return 0, fmt.Errorf("unknown JP-safe profile: %s", name)
+}
+
+func leaseRoleRequiresAlwaysOn(role string) bool {
+	switch role {
+	case "lora_relay", "mesh_router", "mesh_root", "ack_owner", "powered_leaf":
+		return true
+	default:
+		return false
+	}
 }
 
 func derefInt(value *int) int {

@@ -3,6 +3,7 @@ package sdk
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"time"
 
 	"github.com/Aero123421/edge-fabric/internal/siterouter"
@@ -106,6 +107,10 @@ func (c *LocalSiteRouterClient) IssueCommand(ctx context.Context, targetNode str
 	if commandID == "" {
 		commandID = fmt.Sprintf("cmd-%d", time.Now().UTC().UnixNano())
 	}
+	commandToken, err := c.allocateCommandToken(ctx, commandID)
+	if err != nil {
+		return nil, 0, err
+	}
 	delivery := &contracts.DeliverySpec{
 		RouteClass:     options.RouteClass,
 		AllowRelay:     options.AllowRelay,
@@ -125,6 +130,7 @@ func (c *LocalSiteRouterClient) IssueCommand(ctx context.Context, targetNode str
 	if options.IdempotencyKey != "" {
 		commandPayload["idempotency_key"] = options.IdempotencyKey
 	}
+	commandPayload["command_token"] = commandToken
 	envelope := &contracts.Envelope{
 		SchemaVersion: "1.0.0",
 		MessageID:     newMessageID(),
@@ -142,6 +148,14 @@ func (c *LocalSiteRouterClient) IssueCommand(ctx context.Context, targetNode str
 		return nil, 0, err
 	}
 	return fromRouterAck(ack), queueID, nil
+}
+
+func (c *LocalSiteRouterClient) RegisterManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error {
+	return c.router.UpsertManifest(ctx, hardwareID, manifest)
+}
+
+func (c *LocalSiteRouterClient) RegisterLease(ctx context.Context, hardwareID string, lease *contracts.Lease) error {
+	return c.router.UpsertLease(ctx, hardwareID, lease)
 }
 
 func (c *LocalSiteRouterClient) ObserveCommand(ctx context.Context, commandID string) (string, error) {
@@ -164,6 +178,34 @@ func (c *LocalSiteRouterClient) PendingCommandDigest(ctx context.Context, target
 
 func newMessageID() string {
 	return fmt.Sprintf("msg-%d", time.Now().UTC().UnixNano())
+}
+
+func commandTokenForID(commandID string) int {
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(commandID))
+	token := int(hasher.Sum32() & 0xFFFF)
+	if token == 0 {
+		return 1
+	}
+	return token
+}
+
+func (c *LocalSiteRouterClient) allocateCommandToken(ctx context.Context, commandID string) (int, error) {
+	token := commandTokenForID(commandID)
+	for attempts := 0; attempts < 0xFFFF; attempts++ {
+		resolved, err := c.router.ResolveCommandIDByToken(ctx, uint16(token))
+		if err != nil {
+			return 0, err
+		}
+		if resolved == "" || resolved == commandID {
+			return token, nil
+		}
+		token++
+		if token > 0xFFFF {
+			token = 1
+		}
+	}
+	return 0, fmt.Errorf("unable to allocate unique command token for %s", commandID)
 }
 
 func mergePayload(base map[string]any, payload map[string]any) map[string]any {

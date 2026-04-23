@@ -1,6 +1,6 @@
 # edge-fabric
 
-`D:\codebase\job\xiao-esp32sx1262Devkit` は、`ESP32-S3 + SX1262` を前提にした
+この repo は、`ESP32-S3 + SX1262` を前提にした
 LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
 
 このルート repo では、次の 2 つを明確に分けます。
@@ -17,6 +17,8 @@ LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
 - `gateway_head` は USB CDC first
 - LoRa は `JP-safe profile` を初期条件として扱う
 - compact / summary codec は `contracts/protocol/compact-codecs.json` を source of truth にする
+- LoRa on-air は short ID 前提の binary header / compact command token を優先する
+- `manifest / lease / role / power-class` を queue 前に反映する
 - `contract -> integration -> HIL -> soak` を各フェーズで gate にする
 
 ## 実装トラック

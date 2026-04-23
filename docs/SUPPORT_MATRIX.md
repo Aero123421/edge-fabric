@@ -16,8 +16,10 @@
 
 | Feature | Status | 検証 | Notes |
 | --- | --- | --- | --- |
-| Site Router durable core | active | Go test / Python reference | SQLite ledger, dedupe, queue, command lifecycle |
-| Host Agent direct ingest | active | Go test / direct demos | JSON fixture, compact/summary relay, spool diagnostics |
+| Site Router durable core | active | Go test / Python reference | SQLite ledger, dedupe, queue, command lifecycle, manifest/lease storage, role gate |
+| Host Agent direct ingest | active | Go test / direct demos | JSON fixture, compact/summary relay, short-ID aware binary on-air decode, spool diagnostics |
+| Lease / role enforcement | limited | Go test | sleepy/battery node に always-on role を与えない gate と short ID lookup を実装 |
+| Payload fit / enqueue gate | limited | Go test | `sleepy_tiny_control` は enqueue 前に compact fit を確認し、lease / short ID が無いと reject |
 | Sleepy command acceptance flow | limited | `cmd/sleepy-cycle-demo` | development backend 前提で `issue -> digest -> poll -> command_result` を確認済み |
 | Gateway runtime scaffold | prototype | コードレビュー / development backend | TinyUSB 有効 build では real backend prototype を優先。初期化失敗時の fallback は dev backend |
 | Node runtime scaffold | prototype | development backend smoke | synthetic digest/command を 1 回たどる最小スモーク |

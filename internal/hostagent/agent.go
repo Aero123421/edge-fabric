@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Aero123421/edge-fabric/internal/protocol/compactcodec"
+	"github.com/Aero123421/edge-fabric/internal/protocol/onair"
 	"github.com/Aero123421/edge-fabric/internal/protocol/usbcdc"
 	"github.com/Aero123421/edge-fabric/internal/siterouter"
 	"github.com/Aero123421/edge-fabric/pkg/contracts"
@@ -45,6 +45,11 @@ type RelayResult struct {
 
 type Ingester interface {
 	Ingest(context.Context, *contracts.Envelope, string) (*siterouter.PersistAck, error)
+}
+
+type RuntimeResolver interface {
+	ResolveHardwareIDByShortID(context.Context, uint16) (string, error)
+	ResolveCommandIDByToken(context.Context, uint16) (string, error)
 }
 
 type Agent struct {
@@ -84,7 +89,7 @@ func (a *Agent) RelayUSBFrame(ctx context.Context, ingressID, sessionID string, 
 		return &RelayResult{Status: "heartbeat_recorded", Observation: observation}, nil
 	}
 	if frameType == FrameCompactBinary || frameType == FrameSummaryBinary {
-		envelope, status, err := decodeCompactSummaryEnvelope(frameType, payload)
+		envelope, status, err := decodeCompactSummaryEnvelope(ctx, runtimeResolver(a.router), frameType, payload)
 		if err != nil {
 			return nil, err
 		}
@@ -119,10 +124,14 @@ func (a *Agent) relayEnvelope(ctx context.Context, ingressID, sessionID, transpo
 	if cloned.Delivery.IngressMeta == nil {
 		cloned.Delivery.IngressMeta = map[string]any{}
 	}
+	cloned.Delivery.IngressMeta["host_link"] = transport
 	cloned.Delivery.IngressMeta["transport"] = transport
 	cloned.Delivery.IngressMeta["session_id"] = sessionID
 	cloned.Delivery.IngressMeta["received_at"] = observation.ReceivedAt
 	cloned.Delivery.IngressMeta["ingress_id"] = ingressID
+	if bearer, ok := observationBearer(observation); ok {
+		cloned.Delivery.IngressMeta["bearer"] = bearer
+	}
 	if observation.RSSI != nil {
 		cloned.Delivery.IngressMeta["rssi"] = *observation.RSSI
 	}
@@ -383,24 +392,36 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
-func decodeCompactSummaryEnvelope(frameType byte, payload []byte) (*contracts.Envelope, string, error) {
-	text := strings.TrimSpace(string(payload))
-	if text == "" {
-		return nil, "", errors.New("empty compact payload")
-	}
-	parts := strings.Split(text, "|")
-	frameSpec, err := loadCompactFrameSpec(frameType)
+func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver, frameType byte, payload []byte) (*contracts.Envelope, string, error) {
+	_ = frameType
+	packet, err := onair.Decode(payload)
 	if err != nil {
 		return nil, "", err
 	}
-	switch parts[0] {
-	case "S":
-		if len(parts) < 5 || parts[1] == "" || parts[2] == "" {
-			return nil, "", errors.New("invalid compact state payload")
-		}
-		shape, err := loadCompactShape(parts[0], frameType)
+	shortID := packet.SourceShortID
+	hardwareID := fmt.Sprintf("short:%d", shortID)
+	if resolver != nil && shortID != 0 {
+		resolved, err := resolver.ResolveHardwareIDByShortID(ctx, shortID)
 		if err != nil {
 			return nil, "", err
+		}
+		if resolved != "" {
+			hardwareID = resolved
+		}
+	}
+	switch packet.LogicalType {
+	case onair.TypeState:
+		body, err := onair.DecodeState(packet)
+		if err != nil {
+			return nil, "", err
+		}
+		shape := "state_compact_v1"
+		wireShape := "compact_v1"
+		codecFamily := "compact_binary_v1"
+		if packet.Summary() {
+			shape = "state_summary_v1"
+			wireShape = "summary_v1"
+			codecFamily = "summary_binary_v1"
 		}
 		return &contracts.Envelope{
 			SchemaVersion: "1.0.0",
@@ -408,46 +429,46 @@ func decodeCompactSummaryEnvelope(frameType byte, payload []byte) (*contracts.En
 			Kind:          "state",
 			Priority:      "normal",
 			OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
-			Source:        contracts.SourceRef{HardwareID: parts[1]},
+			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "service", Value: "state"},
 			Payload: map[string]any{
-				"state_key":    parts[2],
-				"value":        parts[3],
-				"event_wake":   parts[4] == "1",
+				"state_key":    stateKeyFromToken(body.KeyToken),
+				"value":        stateValueFromToken(body.ValueToken),
+				"event_wake":   body.EventWake,
 				"shape":        shape,
-				"wire_shape":   frameSpec.WireShape,
-				"codec_family": frameSpec.Name,
+				"wire_shape":   wireShape,
+				"codec_family": codecFamily,
+				"source_short_id": shortID,
 			},
 		}, "", nil
-	case "E":
-		if len(parts) < 4 || parts[1] == "" || parts[2] == "" {
-			return nil, "", errors.New("invalid compact event payload")
-		}
-		shape, err := loadCompactShape(parts[0], frameType)
+	case onair.TypeCommandResult:
+		body, err := onair.DecodeCommandResult(packet)
 		if err != nil {
 			return nil, "", err
 		}
-		return &contracts.Envelope{
-			SchemaVersion: "1.0.0",
-			MessageID:     fmt.Sprintf("msg-compact-%d", time.Now().UTC().UnixNano()),
-			Kind:          "event",
-			Priority:      "critical",
-			EventID:       parts[2],
-			OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
-			Source:        contracts.SourceRef{HardwareID: parts[1]},
-			Target:        contracts.TargetRef{Kind: "service", Value: "events"},
-			Payload: map[string]any{
-				"value":        parts[3],
-				"shape":        shape,
-				"wire_shape":   frameSpec.WireShape,
-				"codec_family": frameSpec.Name,
-			},
-		}, "", nil
-	case "R":
-		if len(parts) < 5 || parts[1] == "" || parts[2] == "" {
-			return nil, "", errors.New("invalid compact command_result payload")
+		shape := "command_result_compact_v1"
+		wireShape := "compact_v1"
+		codecFamily := "compact_binary_v1"
+		if packet.Summary() {
+			shape = "command_result_summary_v1"
+			wireShape = "summary_v1"
+			codecFamily = "summary_binary_v1"
 		}
-		shape, err := loadCompactShape(parts[0], frameType)
+		commandID := fmt.Sprintf("token:%d", body.CommandToken)
+		if resolver != nil {
+			resolved, err := resolver.ResolveCommandIDByToken(ctx, body.CommandToken)
+			if err != nil {
+				return nil, "", err
+			}
+			if resolved != "" {
+				commandID = resolved
+			}
+		}
+		phase, err := commandPhaseFromToken(body.PhaseToken)
+		if err != nil {
+			return nil, "", err
+		}
+		reason, err := commandReasonFromToken(body.ReasonToken)
 		if err != nil {
 			return nil, "", err
 		}
@@ -456,40 +477,110 @@ func decodeCompactSummaryEnvelope(frameType byte, payload []byte) (*contracts.En
 			MessageID:     fmt.Sprintf("msg-compact-%d", time.Now().UTC().UnixNano()),
 			Kind:          "command_result",
 			Priority:      "control",
-			CommandID:     parts[2],
+			CommandID:     commandID,
 			OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
-			Source:        contracts.SourceRef{HardwareID: parts[1]},
+			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "client", Value: "sleepy-node-sdk"},
 			Payload: map[string]any{
-				"command_id":   parts[2],
-				"phase":        parts[3],
-				"result":       parts[4],
-				"shape":        shape,
-				"wire_shape":   frameSpec.WireShape,
-				"codec_family": frameSpec.Name,
+				"command_id":    commandID,
+				"command_token": int(body.CommandToken),
+				"phase":         phase,
+				"result":        reason,
+				"shape":         shape,
+				"wire_shape":    wireShape,
+				"codec_family":  codecFamily,
+				"source_short_id": shortID,
 			},
 		}, "", nil
-	case "D":
+	case onair.TypePendingDigest:
 		return nil, "digest_recorded", nil
-	case "P":
+	case onair.TypeTinyPoll:
 		return nil, "poll_recorded", nil
 	default:
-		return nil, "", errors.New("unsupported compact payload kind")
+		return nil, "", errors.New("unsupported on-air logical type")
 	}
 }
 
-func loadCompactFrameSpec(frameType byte) (*compactcodec.FrameTypeSpec, error) {
-	registry, err := compactcodec.LoadRegistry(compactcodec.DefaultRegistryPath())
-	if err != nil {
-		return nil, err
+func runtimeResolver(router Ingester) RuntimeResolver {
+	resolver, ok := router.(RuntimeResolver)
+	if !ok {
+		return nil
 	}
-	return registry.FrameTypeSpec(frameType)
+	return resolver
 }
 
-func loadCompactShape(logicalKey string, frameType byte) (string, error) {
-	registry, err := compactcodec.LoadRegistry(compactcodec.DefaultRegistryPath())
-	if err != nil {
-		return "", err
+func observationBearer(observation *IngressObservation) (string, bool) {
+	if observation == nil || observation.FrameType == nil {
+		return "", false
 	}
-	return registry.ShapeFor(logicalKey, frameType)
+	if *observation.FrameType == FrameCompactBinary || *observation.FrameType == FrameSummaryBinary {
+		return "lora", true
+	}
+	return "", false
+}
+
+func shortIDPtr(value uint16) *int {
+	if value == 0 {
+		return nil
+	}
+	converted := int(value)
+	return &converted
+}
+
+func stateKeyFromToken(token byte) string {
+	switch token {
+	case onair.StateKeyNodePower:
+		return "node.power"
+	default:
+		return "state.unknown"
+	}
+}
+
+func stateValueFromToken(token byte) string {
+	switch token {
+	case onair.StateValueAwake:
+		return "awake"
+	case onair.StateValueSleep:
+		return "sleep"
+	default:
+		return "unknown"
+	}
+}
+
+func commandPhaseFromToken(token byte) (string, error) {
+	switch token {
+	case onair.PhaseAccepted:
+		return "accepted", nil
+	case onair.PhaseExecuting:
+		return "executing", nil
+	case onair.PhaseSucceeded:
+		return "succeeded", nil
+	case onair.PhaseFailed:
+		return "failed", nil
+	case onair.PhaseRejected:
+		return "rejected", nil
+	case onair.PhaseExpired:
+		return "expired", nil
+	default:
+		return "", fmt.Errorf("unknown command_result phase token: %d", token)
+	}
+}
+
+func commandReasonFromToken(token byte) (string, error) {
+	switch token {
+	case onair.ReasonOK:
+		return "ok", nil
+	case onair.ReasonService:
+		return "svc", nil
+	case onair.ReasonMaintenance:
+		return "maintenance", nil
+	case onair.ReasonStale:
+		return "stale", nil
+	case onair.ReasonBadCommand:
+		return "badcmd", nil
+	case onair.ReasonUnsupported:
+		return "unsupported", nil
+	default:
+		return "", fmt.Errorf("unknown command_result reason token: %d", token)
+	}
 }

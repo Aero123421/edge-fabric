@@ -14,6 +14,8 @@
 
 ## Routing
 
+- Go runtime では short ID / lease / payload-fit gate を先行実装したが、firmware 側の on-air binary と deep sleep 実装はまだ追随中です
+- `sleepy_tiny_control` の compact downlink は小さい command subset を優先し、rich payload / OTA / maintenance transfer はまだ summary / maintenance path 側です
 - `Wi-Fi mesh backbone`
 - `LoRa 1-relay / 2-relay`
 - `hybrid routing`

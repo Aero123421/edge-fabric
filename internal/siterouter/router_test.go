@@ -440,6 +440,122 @@ func TestPendingDigestFlagsUrgencyAcrossMixedQueueStates(t *testing.T) {
 	}
 }
 
+func TestSleepyLeaseRejectsAlwaysOnRole(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, "battery-leaf-01", &contracts.Manifest{
+		HardwareID:          "battery-leaf-01",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "primary_battery",
+		WakeClass:           "sleepy_event",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"sleepy_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := router.UpsertLease(ctx, "battery-leaf-01", &contracts.Lease{
+		RoleLeaseID:      "lease-bad-01",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-bad-01",
+		FabricShortID:    intPtr(201),
+		EffectiveRole:    "mesh_router",
+		PrimaryBearer:    "wifi_mesh",
+	})
+	if err == nil {
+		t.Fatal("expected sleepy/battery role enforcement error")
+	}
+}
+
+func TestSleepyTinyControlRequiresLeaseAndShortID(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	command := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-command-route-01",
+		Kind:          "command",
+		Priority:      "control",
+		CommandID:     "cmd-route-01",
+		OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Source:        contracts.SourceRef{HardwareID: "controller-06"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "sleepy-04"},
+		Delivery:      &contracts.DeliverySpec{RouteClass: "sleepy_tiny_control"},
+		Payload: map[string]any{
+			"command_name":  "mode.set",
+			"mode":          "maintenance_awake",
+			"command_token": 0x1020,
+		},
+	}
+	if _, _, err := router.IssueCommand(ctx, command, "local", ""); err == nil {
+		t.Fatal("expected missing lease/short id error")
+	}
+	if err := router.UpsertManifest(ctx, "sleepy-04", &contracts.Manifest{
+		HardwareID:          "sleepy-04",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "primary_battery",
+		WakeClass:           "sleepy_event",
+		SupportedBearers:    []string{"lora", "ble_maintenance"},
+		AllowedNetworkRoles: []string{"sleepy_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "sleepy-04", &contracts.Lease{
+		RoleLeaseID:      "lease-good-01",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-good-01",
+		FabricShortID:    intPtr(204),
+		EffectiveRole:    "sleepy_leaf",
+		PrimaryBearer:    "lora",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := router.IssueCommand(ctx, command, "local", ""); err != nil {
+		t.Fatalf("expected sleepy_tiny_control planning to pass, got %v", err)
+	}
+}
+
+func TestDuplicateCommandResultSamePhaseIsIdempotent(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	command := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-command-token-01",
+		Kind:          "command",
+		Priority:      "control",
+		CommandID:     "cmd-token-01",
+		Source:        contracts.SourceRef{HardwareID: "controller-07"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "sleepy-07"},
+		Payload: map[string]any{
+			"command_name":  "mode.set",
+			"mode":          "maintenance_awake",
+			"command_token": 0x2201,
+		},
+	}
+	if _, err := router.Ingest(ctx, command, "local"); err != nil {
+		t.Fatal(err)
+	}
+	result := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-command-token-result-01",
+		Kind:          "command_result",
+		Priority:      "control",
+		Source:        contracts.SourceRef{HardwareID: "sleepy-07"},
+		Target:        contracts.TargetRef{Kind: "client", Value: "controller-07"},
+		Payload: map[string]any{
+			"command_token": 0x2201,
+			"phase":         "accepted",
+		},
+	}
+	if _, err := router.Ingest(ctx, result, "local"); err != nil {
+		t.Fatal(err)
+	}
+	result.MessageID = "msg-command-token-result-02"
+	if _, err := router.Ingest(ctx, result, "local"); err != nil {
+		t.Fatalf("duplicate same-phase result should be idempotent, got %v", err)
+	}
+}
+
 func intPtr(value int) *int {
 	return &value
 }
