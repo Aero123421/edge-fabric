@@ -6,7 +6,7 @@
 
 | Target | Runtime | 必須ツール | 現状 | Notes |
 | --- | --- | --- | --- | --- |
-| Ubuntu Server | Go mainline | `Go 1.26.x` | 開発本線 | `Site Router` / `Host Agent` / SDK / durable core の主対象 |
+| Ubuntu Server | Go mainline | `Go 1.25.x` | 開発本線 | `Site Router` / `Host Agent` / SDK / durable core の主対象 |
 | Windows 開発環境 | Go bundled toolchain | `.\.tools\go-sdk\bin\go.exe` | 制限付きサポート | 開発・検証向け。production deployment の主対象ではない |
 | Python reference | Python 3.12+ | `python`, `pip` | reference-only | 契約比較、fixture、behavior comparison 用 |
 | ESP32-S3 gateway-head | ESP-IDF 5.2+ | `idf.py`, 実機ボード | prototype | binary on-air frame を USB/LoRa 間で中継する。TinyUSB / SX1262 real backend は prototype、compile/HIL は未確認 |
@@ -20,7 +20,7 @@
 | Host Agent direct ingest | active | Go test / direct demos | JSON fixture, compact/summary relay, short-ID aware binary on-air decode, spool diagnostics |
 | Lease / role enforcement | limited | Go test | sleepy/battery node に always-on role を与えない gate と short ID lookup を実装 |
 | Payload fit / enqueue gate | limited | Go test | `sleepy_tiny_control` は enqueue 前に compact fit を確認し、lease / short ID が無いと reject |
-| Sleepy command acceptance flow | limited | `cmd/sleepy-cycle-demo` / development backend smoke | `issue -> digest -> poll -> command_result` を binary on-air で確認済み |
+| Sleepy command acceptance flow | limited | `cmd/sleepy-cycle-demo` / development backend smoke | `issue -> digest -> poll -> command_result` を short-ID aware binary on-air demo と development backend smoke で確認 |
 | Gateway runtime scaffold | prototype | コードレビュー / development backend | on-air header を優先して USB frame type を決める。legacy compact 互換のため最小フォールバックは残している |
 | Node runtime scaffold | prototype | development backend smoke | synthetic digest/command を binary on-air で 1 回たどる最小スモーク |
 | Real USB CDC backend | prototype | コード実装あり / HIL未検証 | TinyUSB CDC-ACM backend を追加済み |

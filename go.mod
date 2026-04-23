@@ -1,6 +1,6 @@
 module github.com/Aero123421/edge-fabric
 
-go 1.26
+go 1.25.0
 
 require modernc.org/sqlite v1.49.1
 

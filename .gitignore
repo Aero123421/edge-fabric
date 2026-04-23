@@ -9,6 +9,7 @@ __pycache__/
 .mypy_cache/
 dist/
 build/
+.artifacts/
 *.egg-info/
 .tools/
 .tmp/

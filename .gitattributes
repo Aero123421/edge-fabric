@@ -1,0 +1,8 @@
+.tools export-ignore
+.tmp export-ignore
+.pytest_cache export-ignore
+*.db export-ignore
+*.sqlite export-ignore
+*.sqlite3 export-ignore
+*.spool*.jsonl export-ignore
+*.rejected.jsonl export-ignore

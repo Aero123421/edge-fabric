@@ -14,7 +14,7 @@
   },
   "target": {
     "kind": "node",
-    "value": "sleepy-leaf-01"
+    "value": "battery-leaf-01"
   },
   "delivery": {
     "route_class": "maintenance_sync",

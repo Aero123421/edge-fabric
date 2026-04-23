@@ -14,10 +14,10 @@
   },
   "target": {
     "kind": "node",
-    "value": "sleepy-leaf-01"
+    "value": "battery-leaf-01"
   },
   "delivery": {
-    "route_class": "sparse_summary",
+    "route_class": "sleepy_tiny_control",
     "allow_relay": true,
     "allow_redundant": false,
     "hop_limit": 1,
@@ -26,6 +26,7 @@
   "payload": {
     "command_name": "threshold.set",
     "service_level": "eventual_next_poll",
-    "threshold": 42
+    "command_token": 8720,
+    "value": 42
   }
 }

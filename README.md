@@ -16,7 +16,9 @@ LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
 - app-facing API に bearer 名を出さない
 - `gateway_head` は USB CDC first
 - LoRa は `JP-safe profile` を初期条件として扱う
-- compact / summary codec は `contracts/protocol/compact-codecs.json` を source of truth にする
+- binary on-air の正本は `contracts/protocol/onair-v1.json` に置く
+- `contracts/protocol/compact-codecs.json` は legacy compact/reference track の artifact として扱う
+- `compact-codecs.json` の frame type `3/4` は USB transport family の shape 管理で、LoRa on-air header そのものの正本ではない
 - LoRa on-air は short ID 前提の binary header / compact command token を優先する
 - `manifest / lease / role / power-class` を queue 前に反映する
 - `contract -> integration -> HIL -> soak` を各フェーズで gate にする
@@ -28,7 +30,7 @@ LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
 - `ESP-IDF firmware`
   `gateway_head` / `sleepy_leaf` / board component の本線実装
 - `Python reference`
-  contract 検証と挙動比較のための参照実装。GA 判定の主軸ではありません
+  legacy compact regression と contract 検証のための参照実装。binary on-air の正本ではなく、GA 判定の主軸でもありません
 
 本線は **`Go + ESP-IDF`** です。`Python` はあくまで参照実装で、挙動比較と fixture 検証に使います。
 
@@ -42,7 +44,7 @@ LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
 
 ## Requirements
 
-- `Go 1.26.x`
+- `Go 1.25.x`
   Ubuntu Server 側の mainline 実装
 - `Python 3.12+`
   参照実装と補助スクリプト
@@ -91,7 +93,9 @@ Bash:
 
 ```bash
 go test ./...
+go run ./cmd/site-router -op doctor
 go run ./cmd/direct-slice-demo
+go run ./cmd/sleepy-cycle-demo
 ```
 
 ### Python reference
@@ -107,6 +111,7 @@ python .\scripts\doctor.py
 python -m unittest discover -s tests -v
 python .\scripts\demo_local_router.py
 python .\scripts\simulate_direct_slice.py
+python .\scripts\export_clean_repo.py
 ```
 
 ### ESP-IDF firmware
@@ -171,7 +176,7 @@ firmware 側の default identity は board MAC 由来で、`gw-XXXXXX` / `leaf-X
 - bounded queue / dedupe / persist ack
 
 `contracts/fixtures/command-servo-set-angle.json` は Site Router / command ledger の汎用デモ用です。
-sleepy leaf と firmware `node-sdk` の確認には `command-sleepy-threshold-set.json` を使います。
+sleepy leaf と firmware `node-sdk` の確認には `command-sleepy-threshold-set.json` を使います。sleepy fixture は `battery-leaf-01` の manifest/lease 例に合わせています。
 
 `Wi-Fi mesh backbone`, `LoRa 1/2-relay`, `hybrid route engine`,
 `multi-domain / multi-host` は段階的に追加します。

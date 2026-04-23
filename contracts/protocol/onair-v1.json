@@ -1,0 +1,112 @@
+{
+  "version": "1.0.0",
+  "track": "mainline",
+  "header": {
+    "version": 1,
+    "size_bytes": 8,
+    "fields": [
+      "version",
+      "logical_type",
+      "flags",
+      "sequence",
+      "source_short_id_le16",
+      "target_short_id_le16"
+    ]
+  },
+  "flags": {
+    "summary": 1
+  },
+  "logical_types": {
+    "1": {
+      "name": "state",
+      "body_size_bytes": 3,
+      "summary_supported": true,
+      "implementation_status": "active"
+    },
+    "2": {
+      "name": "event",
+      "body_size_bytes": null,
+      "summary_supported": true,
+      "implementation_status": "reserved"
+    },
+    "3": {
+      "name": "command_result",
+      "body_size_bytes": 4,
+      "summary_supported": true,
+      "implementation_status": "active"
+    },
+    "4": {
+      "name": "pending_digest",
+      "body_size_bytes": 2,
+      "summary_supported": true,
+      "implementation_status": "active"
+    },
+    "5": {
+      "name": "tiny_poll",
+      "body_size_bytes": 1,
+      "summary_supported": false,
+      "implementation_status": "active"
+    },
+    "6": {
+      "name": "compact_command",
+      "body_size_bytes": 5,
+      "summary_supported": true,
+      "implementation_status": "active"
+    },
+    "7": {
+      "name": "heartbeat",
+      "body_size_bytes": null,
+      "summary_supported": true,
+      "implementation_status": "reserved"
+    }
+  },
+  "state": {
+    "keys": {
+      "1": "node.power"
+    },
+    "values": {
+      "0": "unknown",
+      "1": "awake",
+      "2": "sleep"
+    }
+  },
+  "compact_command": {
+    "kinds": {
+      "1": "maintenance_on",
+      "2": "maintenance_off",
+      "3": "threshold.set",
+      "4": "quiet.set",
+      "5": "alarm.clear",
+      "6": "sampling.set"
+    }
+  },
+  "command_result": {
+    "phases": {
+      "1": "accepted",
+      "2": "executing",
+      "3": "succeeded",
+      "4": "failed",
+      "5": "rejected",
+      "6": "expired"
+    },
+    "reasons": {
+      "1": "ok",
+      "2": "svc",
+      "3": "maintenance",
+      "4": "stale",
+      "5": "badcmd",
+      "6": "unsupported"
+    }
+  },
+  "tiny_poll": {
+    "service_levels": {
+      "1": "eventual_next_poll"
+    }
+  },
+  "pending_digest": {
+    "flags": {
+      "1": "urgent",
+      "2": "expires_soon"
+    }
+  }
+}

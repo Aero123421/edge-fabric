@@ -1,5 +1,7 @@
 {
   "version": "1.0.0",
+  "track": "legacy_reference",
+  "scope": "python-reference-and-legacy-compact-shape-regression",
   "frame_types": {
     "3": {
       "name": "compact_binary_v1",

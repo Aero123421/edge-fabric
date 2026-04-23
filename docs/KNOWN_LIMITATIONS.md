@@ -11,6 +11,7 @@
 - `sleepy leaf` は sleepy-safe compact command subset を優先し、rich event codec / OTA / maintenance transfer はまだ限定的です
 - `sleepy leaf` は light sleep まで入ったが、deep sleep / RTC wake / 完全な power-state orchestration まではまだありません
 - firmware 側の default identity は board MAC 由来になったが、lease/provisioning での正式上書きはまだ未実装です
+- binary on-air の正本は `contracts/protocol/onair-v1.json` に寄せていますが、`event` / `heartbeat` の body codec surface はまだ予約済みトークンの段階です
 
 ## Routing
 
@@ -26,5 +27,6 @@
 ## Validation
 
 - Go / Python の contract / integration / acceptance は増やしています
+- Python reference は legacy compact regression 用で、binary on-air の主線 validator ではありません
 - ESP-IDF は `idf.py build` と実機 HIL をまだこの環境で回していません
 - soak / perf / security gate は release hardening の残課題です

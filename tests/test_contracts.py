@@ -74,10 +74,20 @@ class ContractTests(unittest.TestCase):
 
     def test_compact_codec_artifact_stays_in_sync(self) -> None:
         artifact = self._load_json("contracts/protocol/compact-codecs.json")
+        self.assertEqual(artifact["track"], "legacy_reference")
         self.assertEqual(frame_type_spec(3).name, artifact["frame_types"]["3"]["name"])
         self.assertEqual(frame_type_spec(4).wire_shape, artifact["frame_types"]["4"]["wire_shape"])
         self.assertEqual(shape_for("S", 3), "state_compact_v1")
         self.assertEqual(shape_for("R", 4), "command_result_summary_v1")
+
+    def test_onair_artifact_declares_mainline_binary_contract(self) -> None:
+        artifact = self._load_json("contracts/protocol/onair-v1.json")
+        self.assertEqual(artifact["track"], "mainline")
+        self.assertEqual(artifact["header"]["version"], 1)
+        self.assertEqual(artifact["header"]["size_bytes"], 8)
+        self.assertEqual(artifact["logical_types"]["1"]["name"], "state")
+        self.assertEqual(artifact["logical_types"]["3"]["name"], "command_result")
+        self.assertEqual(artifact["logical_types"]["7"]["implementation_status"], "reserved")
 
     def test_sleepy_command_policy_artifact_covers_fixtures(self) -> None:
         policy = self._load_json("contracts/protocol/sleepy-command-policy.json")
@@ -91,6 +101,9 @@ class ContractTests(unittest.TestCase):
             accepted["payload"]["service_level"],
             policy["default_service_level"],
         )
+        self.assertEqual(accepted["delivery"]["route_class"], "sleepy_tiny_control")
+        self.assertIn("command_token", accepted["payload"])
+        self.assertIn("value", accepted["payload"])
         self.assertIn(
             maintenance["payload"]["command_name"],
             policy["maintenance_only_commands"],

@@ -18,8 +18,11 @@
   JP-safe profile table
 - `protocol/usb-cdc-frame.json`
   gateway_head 向け USB CDC framing 定義
+- `protocol/onair-v1.json`
+  Go mainline / ESP-IDF firmware が共有する binary on-air header と token 定義
 - `protocol/compact-codecs.json`
-  compact/summary frame type と logical shape の固定表
+  legacy compact/reference track の frame type と logical shape の固定表
+  ここでの frame type `3/4` は USB transport 上の compact/summary family を指し、LoRa on-air header 自体の正本ではありません
 - `protocol/heartbeat-wire.json`
   gateway heartbeat JSON と LoRa heartbeat shape の固定表
 - `protocol/sleepy-command-policy.json`
@@ -28,11 +31,11 @@
 ## 利用トラック
 
 - `Go mainline`
-  wire / contract validation、compact/summary decode、acceptance fixture
+  wire / contract validation、binary on-air decode、acceptance fixture
 - `ESP-IDF firmware`
-  USB frame type、JP-safe profile、sleepy command policy の実装指針
+  USB frame type、binary on-air、JP-safe profile、sleepy command policy の実装指針
 - `Python reference`
-  artifact sync と regression 比較
+  legacy compact artifact sync と regression 比較
 
 ## 契約を変える順番
 
@@ -40,3 +43,10 @@
 2. `contracts/protocol/*.json` を更新する
 3. Go / Python のテストと doctor を更新する
 4. firmware README / limitations / support matrix の差分を確認する
+
+## 正本の扱い
+
+- binary on-air の正本は `contracts/protocol/onair-v1.json`
+- `compact-codecs.json` は Python reference / legacy compact 比較用 artifact
+- legacy compact は互換比較・shape 回帰のために残しており、新規 mainline 送信の正本ではありません
+- `sleepy-command-policy.json` は sleepy leaf command subset の正本
