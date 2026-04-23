@@ -51,7 +51,7 @@ LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
 - `ESP-IDF 5.2+`
   `ESP32-S3` firmware
 
-ローカルに Go がない場合でも、この repo では Windows 向けに `.\.tools\go-sdk\bin\go.exe` を使えます。
+`Go` は `PATH` 上の標準ツールチェーンを前提にします。maintainer ローカルの補助 toolchain を使う場合でも、公開物と CI の正本は `go` コマンドです。
 
 ## ディレクトリ
 
@@ -79,20 +79,22 @@ LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
 PowerShell:
 
 ```powershell
-.\.tools\go-sdk\bin\go.exe test ./...
-.\.tools\go-sdk\bin\go.exe run .\cmd\site-router -op doctor
-.\.tools\go-sdk\bin\go.exe run .\cmd\site-router -op issue-command -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
-.\.tools\go-sdk\bin\go.exe run .\cmd\site-router -op pending-digest -hardware-id <leaf-hardware-id>
-.\.tools\go-sdk\bin\go.exe run .\cmd\host-agent -mode direct-json -input .\contracts\fixtures\event-battery-alert.json
-.\.tools\go-sdk\bin\go.exe run .\cmd\host-agent -mode diagnostics
-.\.tools\go-sdk\bin\go.exe run .\cmd\direct-slice-demo
-.\.tools\go-sdk\bin\go.exe run .\cmd\sleepy-cycle-demo
+go test ./...
+python .\scripts\doctor.py --require-go
+go run .\cmd\site-router -op doctor
+go run .\cmd\site-router -op issue-command -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
+go run .\cmd\site-router -op pending-digest -hardware-id <leaf-hardware-id>
+go run .\cmd\host-agent -mode direct-json -input .\contracts\fixtures\event-battery-alert.json
+go run .\cmd\host-agent -mode diagnostics
+go run .\cmd\direct-slice-demo
+go run .\cmd\sleepy-cycle-demo
 ```
 
 Bash:
 
 ```bash
 go test ./...
+python ./scripts/doctor.py --require-go
 go run ./cmd/site-router -op doctor
 go run ./cmd/direct-slice-demo
 go run ./cmd/sleepy-cycle-demo
@@ -114,6 +116,8 @@ python .\scripts\simulate_direct_slice.py
 python .\scripts\export_clean_repo.py
 ```
 
+`export_clean_repo.py` は既定で clean worktree を要求し、`HEAD` の source zip を作ります。`--allow-dirty` は maintainer 向けのローカル確認用で、未コミット変更を zip に含めません。
+
 ### ESP-IDF firmware
 
 `ESP-IDF` が未導入でも、この repo では先に次を確認できます。
@@ -124,9 +128,8 @@ python .\scripts\export_clean_repo.py
 
 この workspace で `ESP-IDF` が未導入な場合、まだできないこと:
 
-- `idf.py build`
 - 実機 flash / monitor
-- TinyUSB / SX1262 real backend の compile 確認
+- TinyUSB / SX1262 real backend のローカル build 確認
 - 実機 HIL
 
 `ESP-IDF` が入っている環境では、各 app ディレクトリで次を実行します。
@@ -134,6 +137,7 @@ python .\scripts\export_clean_repo.py
 [要: ESP-IDF環境]
 
 ```bash
+python ./scripts/doctor.py --require-go --require-idf
 idf.py set-target esp32s3
 idf.py build
 ```
@@ -144,7 +148,7 @@ idf.py build
 - `firmware/esp-idf/node-sdk`
 
 この workspace では `idf.py` / `IDF_PATH` が未導入な場合があります。
-その場合、repo 側では contract / demo / doctor / known limitations を先に維持し、実機 build は ESP-IDF 環境で追います。
+その場合、repo 側では contract / demo / doctor / known limitations を先に維持し、実機 build は ESP-IDF 環境で追います。CI では `gateway-head` と `node-sdk` の `idf.py build` smoke を別 job で回します。
 
 firmware 側の default identity は board MAC 由来で、`gw-XXXXXX` / `leaf-XXXXXX` と short ID を暫定生成します。
 正式な site lease / provisioning 上書きは今後の実装対象です。

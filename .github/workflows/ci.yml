@@ -33,9 +33,14 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.4"
+      - name: Doctor (Go strict)
+        run: python scripts/doctor.py --require-go
       - name: Go tests
         run: go test ./...
       - name: Go command builds
@@ -52,10 +57,15 @@ jobs:
           - firmware/esp-idf/node-sdk
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - name: Install ESP-IDF
         uses: espressif/install-esp-idf-action@v1
         with:
           version: "v5.2.6"
+      - name: Doctor (IDF strict)
+        run: python scripts/doctor.py --require-idf
       - name: Build firmware app
         working-directory: ${{ matrix.app }}
         run: |

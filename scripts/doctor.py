@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import json
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,7 +18,81 @@ def load_json(path: Path) -> dict:
         raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
 
 
-def main() -> int:
+def optional_tool_version(command: list[str]) -> str:
+    executable = shutil.which(command[0])
+    if executable is None:
+        return "missing"
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return "error"
+    return (result.stdout or result.stderr).strip().splitlines()[0]
+
+def parse_go_version_line(version_line: str) -> tuple[int, int] | None:
+    match = re.search(r"go version go(\d+)\.(\d+)", version_line)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+def validate_legacy_payload_boundaries(root: Path) -> str | None:
+    allowed = {
+        (root / "src" / "edge_fabric" / "host" / "agent.py").resolve(),
+        (root / "tests" / "test_host_agent.py").resolve(),
+        (root / "scripts" / "doctor.py").resolve(),
+    }
+    source_roots = [
+        root / "cmd",
+        root / "internal",
+        root / "firmware",
+        root / "src",
+        root / "tests",
+        root / "scripts",
+    ]
+    markers = (
+        'b"R|',
+        'b"S|',
+        'b"D|',
+        'b"P|',
+        'b"E|',
+        'b"H|',
+        'b"C|',
+        '[]byte("R|',
+        '[]byte("S|',
+        '[]byte("D|',
+        '[]byte("P|',
+        '[]byte("E|',
+        '[]byte("H|',
+        '[]byte("C|',
+        '"R|',
+        '"S|',
+        '"D|',
+        '"P|',
+        '"E|',
+        '"H|',
+        '"C|',
+    )
+    for source_root in source_roots:
+        if not source_root.exists():
+            continue
+        for path in source_root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in {".py", ".go", ".c", ".h"}:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            if any(marker in text for marker in markers) and path.resolve() not in allowed:
+                return f"legacy pipe payload markers must stay confined to reference track: {path}"
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--require-go", action="store_true")
+    parser.add_argument("--require-idf", action="store_true")
+    args = parser.parse_args(argv)
+
     root = Path(__file__).resolve().parent.parent
     required = [
         root / "README.md",
@@ -36,6 +114,20 @@ def main() -> int:
     if sys.version_info < (3, 12):
         print("Python 3.12+ is required")
         return 1
+    go_version = optional_tool_version(["go", "version"])
+    idf_version = optional_tool_version(["idf.py", "--version"])
+    print(f"Go: {go_version}")
+    print(f"idf.py: {idf_version}")
+    if args.require_go and go_version == "missing":
+        print("Go toolchain is required for this doctor mode")
+        return 1
+    if args.require_idf and idf_version == "missing":
+        print("idf.py is required for this doctor mode")
+        return 1
+    parsed_go = parse_go_version_line(go_version)
+    if parsed_go is not None and parsed_go < (1, 25):
+        print("Go 1.25+ is required")
+        return 1
 
     missing = [path for path in required if not path.exists()]
     if missing:
@@ -47,7 +139,9 @@ def main() -> int:
         root / ".tmp-host-agent.db",
         root / ".tmp-site-router.db",
         root / "direct-slice-demo.db",
+        root / "direct-slice-demo.spool.jsonl",
         root / "sleepy-cycle-demo.db",
+        root / "sleepy-cycle-demo.spool.jsonl",
     ]
     present_forbidden = [path for path in forbidden_root_artifacts if path.exists()]
     if present_forbidden:
@@ -56,7 +150,14 @@ def main() -> int:
         return 1
 
     sleepy_demo = (root / "cmd" / "sleepy-cycle-demo" / "main.go").read_text(encoding="utf-8")
-    stale_tokens = ['[]byte("D|', '[]byte("P|', '[]byte("R|']
+    stale_tokens = [
+        '[]byte("D|',
+        '[]byte("P|',
+        '[]byte("R|',
+        '[]byte("E|',
+        '[]byte("H|',
+        '[]byte("C|',
+    ]
     if any(token in sleepy_demo for token in stale_tokens):
         print("sleepy-cycle-demo is still using legacy pipe-delimited payloads")
         return 1
@@ -101,6 +202,13 @@ def main() -> int:
         return 1
     if "binary on-air の正本ではなく" not in readme:
         print("README must mark Python reference as non-authoritative for binary on-air")
+        return 1
+    if ".tools\\go-sdk\\bin\\go.exe" in readme or "./.tools/go-sdk/bin/go.exe" in readme:
+        print("README must not rely on maintainer-local .tools Go path")
+        return 1
+    legacy_boundary_error = validate_legacy_payload_boundaries(root)
+    if legacy_boundary_error:
+        print(legacy_boundary_error)
         return 1
 
     print("Repository layout looks healthy.")

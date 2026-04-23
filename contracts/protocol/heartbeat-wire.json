@@ -1,12 +1,23 @@
 {
   "version": "1.0.0",
+  "track": "legacy_reference",
+  "scope": "gateway-heartbeat-json-and-legacy-compact-heartbeat-shapes",
+  "mainline_onair_status": "reserved",
   "usb_frame_type": 2,
-  "gateway_heartbeat_fields": [
-    "gateway_id",
-    "live",
-    "status",
-    "value"
-  ],
+  "gateway_json_shapes": {
+    "status_heartbeat_v1": [
+      "gateway_id",
+      "live",
+      "status",
+      "value"
+    ],
+    "lora_ingress_v1": [
+      "gateway_id",
+      "status",
+      "rssi",
+      "snr"
+    ]
+  },
   "lora_compact_shapes": {
     "3": "heartbeat_compact_v1",
     "4": "heartbeat_summary_v1"

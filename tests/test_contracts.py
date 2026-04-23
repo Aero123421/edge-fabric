@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -89,6 +90,158 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(artifact["logical_types"]["3"]["name"], "command_result")
         self.assertEqual(artifact["logical_types"]["7"]["implementation_status"], "reserved")
 
+    def test_onair_artifact_matches_go_and_firmware_constants(self) -> None:
+        artifact = self._load_json("contracts/protocol/onair-v1.json")
+        go_source = (ROOT / "internal" / "protocol" / "onair" / "codec.go").read_text(encoding="utf-8")
+        firmware_header = (
+            ROOT
+            / "firmware"
+            / "esp-idf"
+            / "components"
+            / "fabric_proto"
+            / "include"
+            / "fabric_proto"
+            / "fabric_proto.h"
+        ).read_text(encoding="utf-8")
+
+        def go_byte(name: str) -> int:
+            pattern = re.escape(name) + r"\s+byte\s*=\s*([^\n]+)"
+            match = re.search(pattern, go_source)
+            self.assertIsNotNone(match, name)
+            expr = match.group(1).strip()
+            if "<<" in expr:
+                left, right = [part.strip() for part in expr.split("<<")]
+                return int(left) << int(right)
+            return int(expr)
+
+        def c_value(name: str) -> int:
+            def eval_expr(expr: str) -> int:
+                expr = expr.strip().strip("()")
+                expr = expr.replace("u", "").replace("U", "")
+                if "<<" in expr:
+                    left, right = [part.strip() for part in expr.split("<<")]
+                    return int(left) << int(right)
+                return int(expr)
+
+            match = re.search(rf"#define\s+{re.escape(name)}\s+([^\n]+)", firmware_header)
+            if match is not None:
+                return eval_expr(match.group(1))
+            match = re.search(rf"{re.escape(name)}\s*=\s*([^,\n]+)", firmware_header)
+            self.assertIsNotNone(match, name)
+            return eval_expr(match.group(1))
+
+        self.assertEqual(artifact["header"]["version"], go_byte("Version"))
+        self.assertEqual(artifact["header"]["version"], c_value("EF_ONAIR_VERSION"))
+        self.assertEqual(artifact["header"]["size_bytes"], c_value("EF_ONAIR_HEADER_SIZE"))
+        self.assertEqual(artifact["flags"]["summary"], go_byte("FlagSummary"))
+        self.assertEqual(artifact["flags"]["summary"], c_value("EF_ONAIR_FLAG_SUMMARY"))
+
+        logical_go = {
+            "1": go_byte("TypeState"),
+            "2": go_byte("TypeEvent"),
+            "3": go_byte("TypeCommandResult"),
+            "4": go_byte("TypePendingDigest"),
+            "5": go_byte("TypeTinyPoll"),
+            "6": go_byte("TypeCompactCommand"),
+            "7": go_byte("TypeHeartbeat"),
+        }
+        logical_c = {
+            "1": c_value("EF_ONAIR_TYPE_STATE"),
+            "2": c_value("EF_ONAIR_TYPE_EVENT"),
+            "3": c_value("EF_ONAIR_TYPE_COMMAND_RESULT"),
+            "4": c_value("EF_ONAIR_TYPE_PENDING_DIGEST"),
+            "5": c_value("EF_ONAIR_TYPE_TINY_POLL"),
+            "6": c_value("EF_ONAIR_TYPE_COMPACT_COMMAND"),
+            "7": c_value("EF_ONAIR_TYPE_HEARTBEAT"),
+        }
+        self.assertEqual(logical_go, {key: int(key) for key in artifact["logical_types"].keys()})
+        self.assertEqual(logical_c, {key: int(key) for key in artifact["logical_types"].keys()})
+
+        self.assertEqual(int(next(iter(artifact["state"]["keys"].keys()))), go_byte("StateKeyNodePower"))
+        self.assertEqual(int(next(iter(artifact["state"]["keys"].keys()))), c_value("EF_ONAIR_STATE_KEY_NODE_POWER"))
+        for key, const_name in {
+            "0": "StateValueUnknown",
+            "1": "StateValueAwake",
+            "2": "StateValueSleep",
+        }.items():
+            self.assertEqual(int(key), go_byte(const_name))
+        for key, const_name in {
+            "0": "EF_ONAIR_STATE_VALUE_UNKNOWN",
+            "1": "EF_ONAIR_STATE_VALUE_AWAKE",
+            "2": "EF_ONAIR_STATE_VALUE_SLEEP",
+        }.items():
+            self.assertEqual(int(key), c_value(const_name))
+
+        for key, const_name in {
+            "1": "CommandKindMaintenanceOn",
+            "2": "CommandKindMaintenanceOff",
+            "3": "CommandKindThresholdSet",
+            "4": "CommandKindQuietSet",
+            "5": "CommandKindAlarmClear",
+            "6": "CommandKindSamplingSet",
+        }.items():
+            self.assertEqual(int(key), go_byte(const_name))
+        for key, const_name in {
+            "1": "EF_ONAIR_COMMAND_KIND_MAINTENANCE_ON",
+            "2": "EF_ONAIR_COMMAND_KIND_MAINTENANCE_OFF",
+            "3": "EF_ONAIR_COMMAND_KIND_THRESHOLD_SET",
+            "4": "EF_ONAIR_COMMAND_KIND_QUIET_SET",
+            "5": "EF_ONAIR_COMMAND_KIND_ALARM_CLEAR",
+            "6": "EF_ONAIR_COMMAND_KIND_SAMPLING_SET",
+        }.items():
+            self.assertEqual(int(key), c_value(const_name))
+
+        for key, const_name in {
+            "1": "PhaseAccepted",
+            "2": "PhaseExecuting",
+            "3": "PhaseSucceeded",
+            "4": "PhaseFailed",
+            "5": "PhaseRejected",
+            "6": "PhaseExpired",
+        }.items():
+            self.assertEqual(int(key), go_byte(const_name))
+        for key, const_name in {
+            "1": "EF_ONAIR_PHASE_ACCEPTED",
+            "2": "EF_ONAIR_PHASE_EXECUTING",
+            "3": "EF_ONAIR_PHASE_SUCCEEDED",
+            "4": "EF_ONAIR_PHASE_FAILED",
+            "5": "EF_ONAIR_PHASE_REJECTED",
+            "6": "EF_ONAIR_PHASE_EXPIRED",
+        }.items():
+            self.assertEqual(int(key), c_value(const_name))
+
+        for key, const_name in {
+            "1": "ReasonOK",
+            "2": "ReasonService",
+            "3": "ReasonMaintenance",
+            "4": "ReasonStale",
+            "5": "ReasonBadCommand",
+            "6": "ReasonUnsupported",
+        }.items():
+            self.assertEqual(int(key), go_byte(const_name))
+        for key, const_name in {
+            "1": "EF_ONAIR_REASON_OK",
+            "2": "EF_ONAIR_REASON_SERVICE",
+            "3": "EF_ONAIR_REASON_MAINTENANCE",
+            "4": "EF_ONAIR_REASON_STALE",
+            "5": "EF_ONAIR_REASON_BAD_COMMAND",
+            "6": "EF_ONAIR_REASON_UNSUPPORTED",
+        }.items():
+            self.assertEqual(int(key), c_value(const_name))
+
+        self.assertEqual(
+            int(next(iter(artifact["tiny_poll"]["service_levels"].keys()))),
+            go_byte("ServiceLevelEventualNextPoll"),
+        )
+        self.assertEqual(
+            int(next(iter(artifact["tiny_poll"]["service_levels"].keys()))),
+            c_value("EF_ONAIR_SERVICE_LEVEL_EVENTUAL_NEXT_POLL"),
+        )
+        self.assertEqual(int("1"), go_byte("PendingFlagUrgent"))
+        self.assertEqual(int("2"), go_byte("PendingFlagExpiresSoon"))
+        self.assertEqual(int("1"), c_value("EF_ONAIR_PENDING_FLAG_URGENT"))
+        self.assertEqual(int("2"), c_value("EF_ONAIR_PENDING_FLAG_EXPIRES_SOON"))
+
     def test_sleepy_command_policy_artifact_covers_fixtures(self) -> None:
         policy = self._load_json("contracts/protocol/sleepy-command-policy.json")
         accepted = self._load_json("contracts/fixtures/command-sleepy-threshold-set.json")
@@ -115,7 +268,23 @@ class ContractTests(unittest.TestCase):
 
     def test_heartbeat_wire_artifact_matches_usb_frame_type(self) -> None:
         artifact = self._load_json("contracts/protocol/heartbeat-wire.json")
+        firmware_source = (
+            ROOT / "firmware" / "esp-idf" / "gateway-head" / "main" / "gateway_head_runtime.c"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(artifact["track"], "legacy_reference")
+        self.assertEqual(artifact["mainline_onair_status"], "reserved")
         self.assertEqual(artifact["usb_frame_type"], 2)
+        self.assertEqual(
+            artifact["gateway_json_shapes"]["status_heartbeat_v1"],
+            ["gateway_id", "live", "status", "value"],
+        )
+        self.assertEqual(
+            artifact["gateway_json_shapes"]["lora_ingress_v1"],
+            ["gateway_id", "status", "rssi", "snr"],
+        )
+        self.assertIn("lora_ingress", firmware_source)
+        self.assertIn("rssi", firmware_source)
+        self.assertIn("snr", firmware_source)
         self.assertEqual(shape_for("H", 4), artifact["lora_compact_shapes"]["4"])
 
 

@@ -24,7 +24,7 @@
   legacy compact/reference track の frame type と logical shape の固定表
   ここでの frame type `3/4` は USB transport 上の compact/summary family を指し、LoRa on-air header 自体の正本ではありません
 - `protocol/heartbeat-wire.json`
-  gateway heartbeat JSON と LoRa heartbeat shape の固定表
+  gateway heartbeat JSON と legacy compact heartbeat shape の固定表
 - `protocol/sleepy-command-policy.json`
   sleepy leaf が通常 wake で受ける command policy
 
@@ -49,4 +49,6 @@
 - binary on-air の正本は `contracts/protocol/onair-v1.json`
 - `compact-codecs.json` は Python reference / legacy compact 比較用 artifact
 - legacy compact は互換比較・shape 回帰のために残しており、新規 mainline 送信の正本ではありません
+- `heartbeat-wire.json` の LoRa shape も legacy compact/reference track 用で、mainline binary on-air の heartbeat body とは分けて扱います
+- `heartbeat-wire.json` の gateway JSON shape は `status_heartbeat_v1` と `lora_ingress_v1` を併記し、gateway runtime の 2 系統を legacy/reference track として管理します
 - `sleepy-command-policy.json` は sleepy leaf command subset の正本

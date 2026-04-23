@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/Aero123421/edge-fabric/internal/hostagent"
@@ -12,12 +13,17 @@ import (
 
 func main() {
 	ctx := context.Background()
-	router, err := siterouter.Open(filepath.Join(".", "direct-slice-demo.db"), 3)
+	tempDir, err := os.MkdirTemp("", "edge-fabric-direct-slice-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(tempDir)
+	router, err := siterouter.Open(filepath.Join(tempDir, "direct-slice-demo.db"), 3)
 	if err != nil {
 		panic(err)
 	}
 	defer router.Close()
-	agent := hostagent.New(router, filepath.Join(".", "direct-slice-demo.spool.jsonl"))
+	agent := hostagent.New(router, filepath.Join(tempDir, "direct-slice-demo.spool.jsonl"))
 
 	event, err := contracts.LoadEnvelope(filepath.Join("contracts", "fixtures", "event-battery-alert.json"))
 	if err != nil {

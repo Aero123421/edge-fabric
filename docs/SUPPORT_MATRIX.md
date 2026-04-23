@@ -7,16 +7,16 @@
 | Target | Runtime | 必須ツール | 現状 | Notes |
 | --- | --- | --- | --- | --- |
 | Ubuntu Server | Go mainline | `Go 1.25.x` | 開発本線 | `Site Router` / `Host Agent` / SDK / durable core の主対象 |
-| Windows 開発環境 | Go bundled toolchain | `.\.tools\go-sdk\bin\go.exe` | 制限付きサポート | 開発・検証向け。production deployment の主対象ではない |
+| Windows 開発環境 | Go mainline | `Go 1.25.x`, `python` | 制限付きサポート | 開発・検証向け。公開物と CI の正本は `go` / `python` コマンド |
 | Python reference | Python 3.12+ | `python`, `pip` | reference-only | 契約比較、fixture、behavior comparison 用 |
-| ESP32-S3 gateway-head | ESP-IDF 5.2+ | `idf.py`, 実機ボード | prototype | binary on-air frame を USB/LoRa 間で中継する。TinyUSB / SX1262 real backend は prototype、compile/HIL は未確認 |
-| ESP32-S3 sleepy leaf | ESP-IDF 5.2+ | `idf.py`, 実機ボード | prototype | binary on-air の state/pending-digest/tiny-poll/compact-command/result を使う。light sleep は入ったが deep sleep / HIL は未完了 |
+| ESP32-S3 gateway-head | ESP-IDF 5.2+ | `idf.py`, 実機ボード | prototype | binary on-air frame を USB/LoRa 間で中継する。CI smoke compile はあるが real backend の HIL は未確認 |
+| ESP32-S3 sleepy leaf | ESP-IDF 5.2+ | `idf.py`, 実機ボード | prototype | binary on-air の state/pending-digest/tiny-poll/compact-command/result を使う。CI smoke compile はあるが deep sleep / HIL は未完了 |
 
 ## Feature Status
 
 | Feature | Status | 検証 | Notes |
 | --- | --- | --- | --- |
-| Site Router durable core | active | Go test / Python reference | SQLite ledger, dedupe, queue, command lifecycle, manifest/lease storage, role gate |
+| Site Router durable core | active | Go test 主線 / Python comparison | SQLite ledger, dedupe, queue, command lifecycle, manifest/lease storage, role gate |
 | Host Agent direct ingest | active | Go test / direct demos | JSON fixture, compact/summary relay, short-ID aware binary on-air decode, spool diagnostics |
 | Lease / role enforcement | limited | Go test | sleepy/battery node に always-on role を与えない gate と short ID lookup を実装 |
 | Payload fit / enqueue gate | limited | Go test | `sleepy_tiny_control` は enqueue 前に compact fit を確認し、lease / short ID が無いと reject |
@@ -36,6 +36,6 @@
 | --- | --- |
 | Go unit / integration | 実行中 |
 | Python reference / artifact checks | 実行中 |
-| ESP-IDF `idf.py build` | この workspace では未実行 |
+| ESP-IDF `idf.py build` | CI smoke compile を構成済み。ローカル workspace 実行は環境依存 |
 | 実機 HIL | 未実行 |
 | soak / perf / security gate | 未完了 |

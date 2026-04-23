@@ -4,9 +4,9 @@
 
 ## Firmware
 
-- `gateway-head` と `node-sdk` は binary on-air frame を使い始めたが、実機 USB CDC / 実 SX1262 driver の compile と HIL はまだ未確認です
+- `gateway-head` と `node-sdk` は binary on-air frame を使い始めた。CI smoke compile は構成済みだが、実機 USB CDC / 実 SX1262 driver の HIL はまだ未確認です
 - `node-sdk` 側は synthetic pending digest / tiny command で RX path smoke を 1 回たどれ、scripted smoke API で分岐も再現できます
-- `gateway-head` 側には TinyUSB CDC / SX1262 real backend の prototype がありますが、compile と HIL はまだ未確認です
+- `gateway-head` 側には TinyUSB CDC / SX1262 real backend の prototype があります。CI smoke compile はあるが、実配線込みの HIL はまだ未確認です
 - `hop_buffered` heartbeat は local enqueue / handoff を意味し、actual radio TX completion は意味しません
 - `sleepy leaf` は sleepy-safe compact command subset を優先し、rich event codec / OTA / maintenance transfer はまだ限定的です
 - `sleepy leaf` は light sleep まで入ったが、deep sleep / RTC wake / 完全な power-state orchestration まではまだありません
@@ -28,5 +28,5 @@
 
 - Go / Python の contract / integration / acceptance は増やしています
 - Python reference は legacy compact regression 用で、binary on-air の主線 validator ではありません
-- ESP-IDF は `idf.py build` と実機 HIL をまだこの環境で回していません
+- ESP-IDF は CI で `idf.py build` smoke を回し始めたが、実機 HIL はまだこの環境で回していません
 - soak / perf / security gate は release hardening の残課題です

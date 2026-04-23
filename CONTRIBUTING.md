@@ -16,8 +16,9 @@
 PowerShell:
 
 ```powershell
-.\.tools\go-sdk\bin\go.exe test ./...
-.\.tools\go-sdk\bin\go.exe run .\cmd\site-router -op doctor
+python .\scripts\doctor.py --require-go
+go test ./...
+go run .\cmd\site-router -op doctor
 ```
 
 ### Python reference に触る場合
@@ -68,6 +69,8 @@ target / feature の公開状態を変える変更では、[docs/SUPPORT_MATRIX.
 [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) を必ず見直してください。
 
 `gofmt` 相当の整形は必須です。CI で再現できるコマンドを PR 説明に添えてください。
+
+公開用 source zip を作るときは clean worktree で `python .\scripts\export_clean_repo.py` を使ってください。編集中の確認だけなら `--allow-dirty` を付けます。
 
 ## 今の優先順位
 
