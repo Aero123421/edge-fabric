@@ -21,7 +21,7 @@
 | Lease / role enforcement | limited | Go test | sleepy/battery node に always-on role を与えない gate と short ID lookup を実装 |
 | Payload fit / enqueue gate | limited | Go test | `sleepy_tiny_control` は enqueue 前に compact fit を確認し、lease / short ID が無いと reject |
 | Sleepy command acceptance flow | limited | `cmd/sleepy-cycle-demo` / development backend smoke | `issue -> digest -> poll -> command_result` を binary on-air で確認済み |
-| Gateway runtime scaffold | prototype | コードレビュー / development backend | compact/summary の heuristic 推測をやめ、on-air header を見て USB frame type を決める |
+| Gateway runtime scaffold | prototype | コードレビュー / development backend | on-air header を優先して USB frame type を決める。legacy compact 互換のため最小フォールバックは残している |
 | Node runtime scaffold | prototype | development backend smoke | synthetic digest/command を binary on-air で 1 回たどる最小スモーク |
 | Real USB CDC backend | prototype | コード実装あり / HIL未検証 | TinyUSB CDC-ACM backend を追加済み |
 | Real SX1262 backend | prototype | コード実装あり / HIL未検証 | official `sx126x_driver` vendor + HAL 実装を追加済み |

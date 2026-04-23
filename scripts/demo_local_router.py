@@ -27,7 +27,7 @@ def main() -> None:
             payload={"alarm_code": "battery_low", "severity": 2, "battery_bucket": 1},
             priority=Priority.CRITICAL,
         )
-        client.issue_command(
+        _ack, queue_id = client.issue_command(
             command_id="cmd-servo-001",
             target_node="servo-node-01",
             payload={"command_name": "servo.set_angle", "angle": 90},
@@ -36,6 +36,7 @@ def main() -> None:
         print("latest state:", router.latest_state("leaf-powered-01", "tank.level"))
         print("event count:", router.count_events())
         print("command state:", router.command_state("cmd-servo-001"))
+        print("queue id:", queue_id)
         print("queue metrics:", router.queue_metrics())
 
 

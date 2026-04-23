@@ -556,6 +556,155 @@ func TestDuplicateCommandResultSamePhaseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestHeartbeatSummaryAndFileChunkSemantics(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	heartbeat := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-heartbeat-01",
+		Kind:          "heartbeat",
+		Priority:      "normal",
+		Source:        contracts.SourceRef{HardwareID: "gateway-head-01"},
+		Target:        contracts.TargetRef{Kind: "host", Value: "site-router"},
+		Delivery: &contracts.DeliverySpec{
+			IngressMeta: map[string]any{"host_link": "usb_cdc", "bearer": "lora_direct"},
+		},
+		Payload: map[string]any{"gateway_id": "gw-alpha", "live": true, "status": "lora_ingress"},
+	}
+	if _, err := router.Ingest(ctx, heartbeat, "usb-gw-alpha"); err != nil {
+		t.Fatal(err)
+	}
+	record, err := router.LatestHeartbeat(ctx, "gw-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record == nil || record.GatewayID != "gw-alpha" || !record.Live || record.HostLink != "usb_cdc" || record.Bearer != "lora_direct" {
+		t.Fatalf("unexpected heartbeat record: %+v", record)
+	}
+
+	summary := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-summary-01",
+		Kind:          "fabric_summary",
+		Priority:      "normal",
+		Source:        contracts.SourceRef{HardwareID: "router-01"},
+		Target:        contracts.TargetRef{Kind: "site", Value: "site-a"},
+		Payload:       map[string]any{"summary_scope": "site-a", "healthy_nodes": 4, "degraded_nodes": 1},
+	}
+	if _, err := router.Ingest(ctx, summary, "mesh-root"); err != nil {
+		t.Fatal(err)
+	}
+	summaryRecord, err := router.LatestFabricSummary(ctx, "site-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summaryRecord == nil || summaryRecord.Payload["healthy_nodes"].(float64) != 4 {
+		t.Fatalf("unexpected summary record: %+v", summaryRecord)
+	}
+
+	messageIDs := []string{"msg-file-chunk-01", "msg-file-chunk-02", "msg-file-chunk-03"}
+	for idx, messageID := range messageIDs {
+		chunk := &contracts.Envelope{
+			SchemaVersion: "1.0.0",
+			MessageID:     messageID,
+			Kind:          "file_chunk",
+			Priority:      "bulk",
+			CorrelationID: "file-demo-01",
+			Source:        contracts.SourceRef{HardwareID: "controller-ota"},
+			Target:        contracts.TargetRef{Kind: "node", Value: "sleepy-ota-01"},
+			Payload: map[string]any{
+				"file_id":      "file-demo-01",
+				"chunk_index":  idx,
+				"total_chunks": 3,
+			},
+		}
+		if _, err := router.Ingest(ctx, chunk, "ota-host"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	progress, err := router.FileChunkProgress(ctx, "file-demo-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress == nil || progress.ReceivedChunks != 3 || !progress.Complete {
+		t.Fatalf("unexpected file chunk progress: %+v", progress)
+	}
+}
+
+func TestOutboundAttemptLedgerTracksPathChoices(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	envelope := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-attempt-01",
+		Kind:          "event",
+		Priority:      "critical",
+		EventID:       "evt-attempt-01",
+		Source:        contracts.SourceRef{HardwareID: "sensor-attempt-01"},
+		Target:        contracts.TargetRef{Kind: "service", Value: "alerts"},
+		Payload:       map[string]any{"alarm_code": "water"},
+	}
+	queueID, err := router.EnqueueOutbound(ctx, envelope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := router.RecordOutboundAttempt(ctx, queueID, "lora", "gw-a", "direct-primary", map[string]any{"rssi": -91})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpdateOutboundAttempt(ctx, attempt.AttemptID, "sent_ok", map[string]any{"airtime_ms": 512}); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := router.ListOutboundAttempts(ctx, queueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Status != "sent_ok" || attempts[0].GatewayID != "gw-a" {
+		t.Fatalf("unexpected attempts: %+v", attempts)
+	}
+}
+
+func TestFileChunkProgressRequiresContiguousCoverageAndLatestUpdate(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	first := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-z-last",
+		Kind:          "file_chunk",
+		Priority:      "bulk",
+		CorrelationID: "file-gap-01",
+		Source:        contracts.SourceRef{HardwareID: "controller-gap"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "sleepy-gap"},
+		Payload:       map[string]any{"file_id": "file-gap-01", "chunk_index": 1, "total_chunks": 3},
+	}
+	second := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-a-last",
+		Kind:          "file_chunk",
+		Priority:      "bulk",
+		CorrelationID: "file-gap-01",
+		Source:        contracts.SourceRef{HardwareID: "controller-gap"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "sleepy-gap"},
+		Payload:       map[string]any{"file_id": "file-gap-01", "chunk_index": 2, "total_chunks": 3},
+	}
+	if _, err := router.Ingest(ctx, first, "gap-host"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.Ingest(ctx, second, "gap-host"); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := router.FileChunkProgress(ctx, "file-gap-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Complete {
+		t.Fatalf("expected incomplete chunk progress, got %+v", progress)
+	}
+	if progress.LastMessageID != "msg-a-last" {
+		t.Fatalf("expected last_message_id to track latest update, got %+v", progress)
+	}
+}
+
 func intPtr(value int) *int {
 	return &value
 }

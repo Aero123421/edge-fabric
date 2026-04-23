@@ -2,6 +2,8 @@ package sdk
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"hash/fnv"
 	"time"
@@ -177,7 +179,11 @@ func (c *LocalSiteRouterClient) PendingCommandDigest(ctx context.Context, target
 }
 
 func newMessageID() string {
-	return fmt.Sprintf("msg-%d", time.Now().UTC().UnixNano())
+	var suffix [4]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return fmt.Sprintf("msg-%d-fallback", time.Now().UTC().UnixNano())
+	}
+	return fmt.Sprintf("msg-%d-%s", time.Now().UTC().UnixNano(), hex.EncodeToString(suffix[:]))
 }
 
 func commandTokenForID(commandID string) int {

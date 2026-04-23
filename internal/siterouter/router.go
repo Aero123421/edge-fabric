@@ -52,6 +52,51 @@ type PendingCommand struct {
 	LeaseUntil string              `json:"lease_until,omitempty"`
 }
 
+type HeartbeatRecord struct {
+	HeartbeatKey     string         `json:"heartbeat_key"`
+	GatewayID        string         `json:"gateway_id,omitempty"`
+	SourceHardwareID string         `json:"source_hardware_id"`
+	IngressID        string         `json:"ingress_id"`
+	HostLink         string         `json:"host_link,omitempty"`
+	Bearer           string         `json:"bearer,omitempty"`
+	Status           string         `json:"status,omitempty"`
+	Live             bool           `json:"live"`
+	MessageID        string         `json:"message_id"`
+	UpdatedAt        string         `json:"updated_at"`
+	Payload          map[string]any `json:"payload"`
+}
+
+type FabricSummaryRecord struct {
+	SummaryKey       string         `json:"summary_key"`
+	SourceHardwareID string         `json:"source_hardware_id"`
+	MessageID        string         `json:"message_id"`
+	UpdatedAt        string         `json:"updated_at"`
+	Payload          map[string]any `json:"payload"`
+}
+
+type FileChunkStatus struct {
+	FileID            string `json:"file_id"`
+	ReceivedChunks    int    `json:"received_chunks"`
+	TotalChunks       int    `json:"total_chunks"`
+	HighestChunkIndex int    `json:"highest_chunk_index"`
+	LastMessageID     string `json:"last_message_id,omitempty"`
+	LastUpdatedAt     string `json:"last_updated_at,omitempty"`
+	Complete          bool   `json:"complete"`
+}
+
+type OutboundAttempt struct {
+	AttemptID int64          `json:"attempt_id"`
+	QueueID   int64          `json:"queue_id"`
+	AttemptNo int            `json:"attempt_no"`
+	Bearer    string         `json:"bearer,omitempty"`
+	GatewayID string         `json:"gateway_id,omitempty"`
+	PathLabel string         `json:"path_label,omitempty"`
+	Status    string         `json:"status"`
+	Detail    map[string]any `json:"detail,omitempty"`
+	CreatedAt string         `json:"created_at"`
+	UpdatedAt string         `json:"updated_at"`
+}
+
 type NodeRuntimeInfo struct {
 	HardwareID string              `json:"hardware_id"`
 	Manifest   *contracts.Manifest `json:"manifest,omitempty"`
@@ -213,6 +258,50 @@ func (r *Router) init(ctx context.Context) error {
 			updated_at TEXT NOT NULL
 		);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_node_lease_fabric_short_id ON node_lease(fabric_short_id) WHERE fabric_short_id IS NOT NULL;`,
+		`CREATE TABLE IF NOT EXISTS heartbeat_ledger (
+			heartbeat_key TEXT PRIMARY KEY,
+			gateway_id TEXT,
+			source_hardware_id TEXT NOT NULL,
+			ingress_id TEXT NOT NULL,
+			host_link TEXT,
+			bearer TEXT,
+			status TEXT,
+			live INTEGER NOT NULL DEFAULT 0,
+			message_id TEXT NOT NULL,
+			payload_json TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS fabric_summary_latest (
+			summary_key TEXT PRIMARY KEY,
+			source_hardware_id TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			payload_json TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS file_chunk_ledger (
+			file_id TEXT NOT NULL,
+			chunk_index INTEGER NOT NULL,
+			total_chunks INTEGER NOT NULL,
+			source_hardware_id TEXT NOT NULL,
+			message_id TEXT NOT NULL UNIQUE,
+			payload_json TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(file_id, chunk_index)
+		);`,
+		`CREATE TABLE IF NOT EXISTS outbox_attempt (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			queue_id INTEGER NOT NULL,
+			attempt_no INTEGER NOT NULL,
+			bearer TEXT,
+			gateway_id TEXT,
+			path_label TEXT,
+			status TEXT NOT NULL,
+			detail_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(queue_id, attempt_no)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_outbox_attempt_queue_id ON outbox_attempt(queue_id, attempt_no);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
@@ -300,6 +389,18 @@ func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingre
 		}
 	case "lease":
 		if err := r.upsertLeaseEnvelope(ctx, tx, envelope, persistedAt); err != nil {
+			return nil, err
+		}
+	case "heartbeat":
+		if err := r.upsertHeartbeatEnvelope(ctx, tx, envelope, ingressID, persistedAt); err != nil {
+			return nil, err
+		}
+	case "fabric_summary":
+		if err := r.upsertFabricSummaryEnvelope(ctx, tx, envelope, persistedAt); err != nil {
+			return nil, err
+		}
+	case "file_chunk":
+		if err := r.upsertFileChunkEnvelope(ctx, tx, envelope, persistedAt); err != nil {
 			return nil, err
 		}
 	}
@@ -517,6 +618,93 @@ func (r *Router) upsertLeaseEnvelope(ctx context.Context, tx *sql.Tx, envelope *
 		return err
 	}
 	return r.upsertLeaseTx(ctx, tx, envelope.Target.Value, &lease, updatedAt)
+}
+
+func (r *Router) upsertHeartbeatEnvelope(
+	ctx context.Context,
+	tx *sql.Tx,
+	envelope *contracts.Envelope,
+	ingressID string,
+	updatedAt string,
+) error {
+	heartbeatKey := heartbeatKeyForEnvelope(envelope)
+	payloadJSON, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO heartbeat_ledger (
+			heartbeat_key, gateway_id, source_hardware_id, ingress_id, host_link, bearer, status, live, message_id, payload_json, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(heartbeat_key) DO UPDATE SET
+			gateway_id = excluded.gateway_id,
+			source_hardware_id = excluded.source_hardware_id,
+			ingress_id = excluded.ingress_id,
+			host_link = excluded.host_link,
+			bearer = excluded.bearer,
+			status = excluded.status,
+			live = excluded.live,
+			message_id = excluded.message_id,
+			payload_json = excluded.payload_json,
+			updated_at = excluded.updated_at
+	`,
+		heartbeatKey,
+		payloadString(envelope.Payload, "gateway_id"),
+		envelope.Source.HardwareID,
+		ingressID,
+		deliveryIngressValue(envelope.Delivery, "host_link"),
+		deliveryIngressValue(envelope.Delivery, "bearer"),
+		payloadString(envelope.Payload, "status"),
+		boolToInt(payloadBool(envelope.Payload, "live")),
+		envelope.MessageID,
+		string(payloadJSON),
+		updatedAt,
+	)
+	return err
+}
+
+func (r *Router) upsertFabricSummaryEnvelope(ctx context.Context, tx *sql.Tx, envelope *contracts.Envelope, updatedAt string) error {
+	summaryKey := fabricSummaryKeyForEnvelope(envelope)
+	payloadJSON, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO fabric_summary_latest (
+			summary_key, source_hardware_id, message_id, payload_json, updated_at
+		) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(summary_key) DO UPDATE SET
+			source_hardware_id = excluded.source_hardware_id,
+			message_id = excluded.message_id,
+			payload_json = excluded.payload_json,
+			updated_at = excluded.updated_at
+	`, summaryKey, envelope.Source.HardwareID, envelope.MessageID, string(payloadJSON), updatedAt)
+	return err
+}
+
+func (r *Router) upsertFileChunkEnvelope(ctx context.Context, tx *sql.Tx, envelope *contracts.Envelope, updatedAt string) error {
+	fileID := fileChunkIDForEnvelope(envelope)
+	chunkIndex := payloadInt64(envelope.Payload, "chunk_index")
+	totalChunks := payloadInt64(envelope.Payload, "total_chunks")
+	if chunkIndex == nil || totalChunks == nil {
+		return contracts.NewValidationError("file_chunk requires payload.chunk_index and payload.total_chunks")
+	}
+	payloadJSON, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO file_chunk_ledger (
+			file_id, chunk_index, total_chunks, source_hardware_id, message_id, payload_json, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(file_id, chunk_index) DO UPDATE SET
+			total_chunks = excluded.total_chunks,
+			source_hardware_id = excluded.source_hardware_id,
+			message_id = excluded.message_id,
+			payload_json = excluded.payload_json,
+			updated_at = excluded.updated_at
+	`, fileID, int(*chunkIndex), int(*totalChunks), envelope.Source.HardwareID, envelope.MessageID, string(payloadJSON), updatedAt)
+	return err
 }
 
 func (r *Router) LatestState(ctx context.Context, hardwareID, stateKey string) (map[string]any, error) {
@@ -1051,6 +1239,216 @@ func (r *Router) PendingCommandsForNode(ctx context.Context, targetHardwareID st
 	return items, rows.Err()
 }
 
+func (r *Router) LatestHeartbeat(ctx context.Context, heartbeatKey string) (*HeartbeatRecord, error) {
+	var (
+		gatewayID string
+		sourceID  string
+		ingressID string
+		hostLink  string
+		bearer    string
+		status    string
+		live      int
+		messageID string
+		payload   string
+		updatedAt string
+	)
+	err := r.db.QueryRowContext(ctx, `
+		SELECT gateway_id, source_hardware_id, ingress_id, COALESCE(host_link, ''), COALESCE(bearer, ''), COALESCE(status, ''), live, message_id, payload_json, updated_at
+		FROM heartbeat_ledger
+		WHERE heartbeat_key = ?
+	`, heartbeatKey).Scan(&gatewayID, &sourceID, &ingressID, &hostLink, &bearer, &status, &live, &messageID, &payload, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var payloadMap map[string]any
+	if err := json.Unmarshal([]byte(payload), &payloadMap); err != nil {
+		return nil, err
+	}
+	return &HeartbeatRecord{
+		HeartbeatKey:     heartbeatKey,
+		GatewayID:        gatewayID,
+		SourceHardwareID: sourceID,
+		IngressID:        ingressID,
+		HostLink:         hostLink,
+		Bearer:           bearer,
+		Status:           status,
+		Live:             live != 0,
+		MessageID:        messageID,
+		UpdatedAt:        updatedAt,
+		Payload:          payloadMap,
+	}, nil
+}
+
+func (r *Router) LatestFabricSummary(ctx context.Context, summaryKey string) (*FabricSummaryRecord, error) {
+	var (
+		sourceID  string
+		messageID string
+		payload   string
+		updatedAt string
+	)
+	err := r.db.QueryRowContext(ctx, `
+		SELECT source_hardware_id, message_id, payload_json, updated_at
+		FROM fabric_summary_latest
+		WHERE summary_key = ?
+	`, summaryKey).Scan(&sourceID, &messageID, &payload, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var payloadMap map[string]any
+	if err := json.Unmarshal([]byte(payload), &payloadMap); err != nil {
+		return nil, err
+	}
+	return &FabricSummaryRecord{
+		SummaryKey:       summaryKey,
+		SourceHardwareID: sourceID,
+		MessageID:        messageID,
+		UpdatedAt:        updatedAt,
+		Payload:          payloadMap,
+	}, nil
+}
+
+func (r *Router) FileChunkProgress(ctx context.Context, fileID string) (*FileChunkStatus, error) {
+	var status FileChunkStatus
+	var minChunkIndex int
+	status.FileID = fileID
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(MAX(total_chunks), 0), COALESCE(MAX(chunk_index), -1), COALESCE(MIN(chunk_index), -1)
+		FROM file_chunk_ledger
+		WHERE file_id = ?
+	`, fileID).Scan(&status.ReceivedChunks, &status.TotalChunks, &status.HighestChunkIndex, &minChunkIndex)
+	if err != nil {
+		return nil, err
+	}
+	err = r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(message_id, ''), COALESCE(updated_at, '')
+		FROM file_chunk_ledger
+		WHERE file_id = ?
+		ORDER BY updated_at DESC, chunk_index DESC
+		LIMIT 1
+	`, fileID).Scan(&status.LastMessageID, &status.LastUpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		status.LastMessageID = ""
+		status.LastUpdatedAt = ""
+	} else if err != nil {
+		return nil, err
+	}
+	status.Complete = status.TotalChunks > 0 &&
+		status.ReceivedChunks == status.TotalChunks &&
+		minChunkIndex == 0 &&
+		status.HighestChunkIndex == status.TotalChunks-1
+	return &status, nil
+}
+
+func (r *Router) RecordOutboundAttempt(
+	ctx context.Context,
+	queueID int64,
+	bearer, gatewayID, pathLabel string,
+	detail map[string]any,
+) (*OutboundAttempt, error) {
+	if queueID <= 0 {
+		return nil, errors.New("queue_id must be > 0")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	detailJSON, err := json.Marshal(cloneMap(detail))
+	if err != nil {
+		return nil, err
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var attemptNo int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM outbox_attempt WHERE queue_id = ?`, queueID).Scan(&attemptNo); err != nil {
+		return nil, err
+	}
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO outbox_attempt (
+			queue_id, attempt_no, bearer, gateway_id, path_label, status, detail_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, 'planned', ?, ?, ?)
+	`, queueID, attemptNo, bearer, gatewayID, pathLabel, string(detailJSON), now, now)
+	if err != nil {
+		return nil, err
+	}
+	attemptID, err := result.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &OutboundAttempt{
+		AttemptID: attemptID,
+		QueueID:   queueID,
+		AttemptNo: attemptNo,
+		Bearer:    bearer,
+		GatewayID: gatewayID,
+		PathLabel: pathLabel,
+		Status:    "planned",
+		Detail:    cloneMap(detail),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil
+}
+
+func (r *Router) UpdateOutboundAttempt(ctx context.Context, attemptID int64, status string, detail map[string]any) error {
+	if attemptID <= 0 {
+		return errors.New("attempt_id must be > 0")
+	}
+	detailJSON, err := json.Marshal(cloneMap(detail))
+	if err != nil {
+		return err
+	}
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE outbox_attempt
+		SET status = ?, detail_json = ?, updated_at = ?
+		WHERE id = ?
+	`, status, string(detailJSON), time.Now().UTC().Format(time.RFC3339Nano), attemptID)
+	if err != nil {
+		return err
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		return errors.New("outbound attempt not found")
+	}
+	return nil
+}
+
+func (r *Router) ListOutboundAttempts(ctx context.Context, queueID int64) ([]OutboundAttempt, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, attempt_no, COALESCE(bearer, ''), COALESCE(gateway_id, ''), COALESCE(path_label, ''), status, detail_json, created_at, updated_at
+		FROM outbox_attempt
+		WHERE queue_id = ?
+		ORDER BY attempt_no
+	`, queueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var attempts []OutboundAttempt
+	for rows.Next() {
+		var attempt OutboundAttempt
+		var detailJSON string
+		attempt.QueueID = queueID
+		if err := rows.Scan(&attempt.AttemptID, &attempt.AttemptNo, &attempt.Bearer, &attempt.GatewayID, &attempt.PathLabel, &attempt.Status, &detailJSON, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if detailJSON != "" {
+			if err := json.Unmarshal([]byte(detailJSON), &attempt.Detail); err != nil {
+				return nil, err
+			}
+		}
+		attempts = append(attempts, attempt)
+	}
+	return attempts, rows.Err()
+}
+
 func (r *Router) upsertManifestTx(ctx context.Context, tx *sql.Tx, hardwareID string, manifest *contracts.Manifest, updatedAt string) error {
 	if manifest == nil {
 		return errors.New("manifest is required")
@@ -1285,6 +1683,79 @@ func payloadInt64(payload map[string]any, key string) *int64 {
 	default:
 		return nil
 	}
+}
+
+func payloadString(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	value, _ := payload[key].(string)
+	return value
+}
+
+func payloadBool(payload map[string]any, key string) bool {
+	if payload == nil {
+		return false
+	}
+	value, _ := payload[key].(bool)
+	return value
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func cloneMap(value map[string]any) map[string]any {
+	if value == nil {
+		return map[string]any{}
+	}
+	cloned := make(map[string]any, len(value))
+	for key, item := range value {
+		cloned[key] = item
+	}
+	return cloned
+}
+
+func heartbeatKeyForEnvelope(envelope *contracts.Envelope) string {
+	gatewayID := payloadString(envelope.Payload, "gateway_id")
+	if gatewayID != "" {
+		return gatewayID
+	}
+	return envelope.Source.HardwareID
+}
+
+func fabricSummaryKeyForEnvelope(envelope *contracts.Envelope) string {
+	if scope := payloadString(envelope.Payload, "summary_scope"); scope != "" {
+		return scope
+	}
+	if siteID := payloadString(envelope.Payload, "site_id"); siteID != "" {
+		return siteID
+	}
+	if envelope.Target.Value != "" {
+		return envelope.Target.Value
+	}
+	return envelope.Source.HardwareID
+}
+
+func fileChunkIDForEnvelope(envelope *contracts.Envelope) string {
+	if fileID := payloadString(envelope.Payload, "file_id"); fileID != "" {
+		return fileID
+	}
+	if envelope.CorrelationID != "" {
+		return envelope.CorrelationID
+	}
+	return envelope.Source.HardwareID + ":" + envelope.Target.Value
+}
+
+func deliveryIngressValue(delivery *contracts.DeliverySpec, key string) string {
+	if delivery == nil || delivery.IngressMeta == nil {
+		return ""
+	}
+	value, _ := delivery.IngressMeta[key].(string)
+	return value
 }
 
 func nullableInt64(value *int64) any {

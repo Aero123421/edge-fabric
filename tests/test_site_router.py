@@ -113,6 +113,22 @@ class SiteRouterTests(unittest.TestCase):
         self.assertTrue(ack2.duplicate)
         self.assertEqual(self.router.command_state("cmd-001"), "succeeded")
 
+    def test_issue_command_returns_queue_and_specialized_semantics(self) -> None:
+        command = {
+            "schema_version": "1.0.0",
+            "message_id": "msg-command-special-001",
+            "kind": "command",
+            "priority": "control",
+            "command_id": "cmd-special-001",
+            "source": {"hardware_id": "controller-10"},
+            "target": {"kind": "node", "value": "sleepy-10"},
+            "payload": {"command_name": "threshold.set", "value": 12, "command_token": 0x2210},
+        }
+        ack, queue_id = self.router.issue_command(command, ingress_id="sdk-local")
+        self.assertEqual(ack.status, "persisted")
+        self.assertGreater(queue_id, 0)
+        self.assertEqual(self.router.command_state("cmd-special-001"), "issued")
+
     def test_latest_state_rebuild_restores_projection(self) -> None:
         first = {
             "schema_version": "1.0.0",
@@ -191,6 +207,90 @@ class SiteRouterTests(unittest.TestCase):
                     "payload": {"phase": "bad_phase", "command_id": "cmd-invalid-phase"},
                 }
             )
+
+    def test_heartbeat_summary_and_file_chunk_records(self) -> None:
+        self.router.ingest(
+            {
+                "schema_version": "1.0.0",
+                "message_id": "msg-heartbeat-01",
+                "kind": "heartbeat",
+                "priority": "normal",
+                "source": {"hardware_id": "gateway-head-01"},
+                "target": {"kind": "host", "value": "site-router"},
+                "delivery": {"ingress_metadata": {"host_link": "usb_cdc", "bearer": "lora_direct"}},
+                "payload": {"gateway_id": "gw-alpha", "live": True, "status": "lora_ingress"},
+            },
+            ingress_id="usb-gw-alpha",
+        )
+        heartbeat = self.router.latest_heartbeat("gw-alpha")
+        assert heartbeat is not None
+        self.assertTrue(heartbeat.live)
+        self.assertEqual(heartbeat.host_link, "usb_cdc")
+
+        self.router.ingest(
+            {
+                "schema_version": "1.0.0",
+                "message_id": "msg-summary-01",
+                "kind": "fabric_summary",
+                "priority": "normal",
+                "source": {"hardware_id": "router-01"},
+                "target": {"kind": "site", "value": "site-a"},
+                "payload": {"summary_scope": "site-a", "healthy_nodes": 4, "degraded_nodes": 1},
+            },
+            ingress_id="mesh-root",
+        )
+        summary = self.router.latest_fabric_summary("site-a")
+        assert summary is not None
+        self.assertEqual(summary.payload["healthy_nodes"], 4)
+
+        for idx in range(3):
+            self.router.ingest(
+                {
+                    "schema_version": "1.0.0",
+                    "message_id": f"msg-file-chunk-{idx}",
+                    "kind": "file_chunk",
+                    "priority": "bulk",
+                    "correlation_id": "file-demo-01",
+                    "source": {"hardware_id": "controller-ota"},
+                    "target": {"kind": "node", "value": "sleepy-ota-01"},
+                    "payload": {"file_id": "file-demo-01", "chunk_index": idx, "total_chunks": 3},
+                },
+                ingress_id="ota-host",
+            )
+        status = self.router.file_chunk_status("file-demo-01")
+        self.assertEqual(status.received_chunks, 3)
+        self.assertTrue(status.complete)
+
+    def test_file_chunk_status_requires_contiguous_coverage_and_latest_update(self) -> None:
+        self.router.ingest(
+            {
+                "schema_version": "1.0.0",
+                "message_id": "msg-z-last",
+                "kind": "file_chunk",
+                "priority": "bulk",
+                "correlation_id": "file-gap-01",
+                "source": {"hardware_id": "controller-gap"},
+                "target": {"kind": "node", "value": "sleepy-gap"},
+                "payload": {"file_id": "file-gap-01", "chunk_index": 1, "total_chunks": 3},
+            },
+            ingress_id="gap-host",
+        )
+        self.router.ingest(
+            {
+                "schema_version": "1.0.0",
+                "message_id": "msg-a-last",
+                "kind": "file_chunk",
+                "priority": "bulk",
+                "correlation_id": "file-gap-01",
+                "source": {"hardware_id": "controller-gap"},
+                "target": {"kind": "node", "value": "sleepy-gap"},
+                "payload": {"file_id": "file-gap-01", "chunk_index": 2, "total_chunks": 3},
+            },
+            ingress_id="gap-host",
+        )
+        status = self.router.file_chunk_status("file-gap-01")
+        self.assertFalse(status.complete)
+        self.assertEqual(status.last_message_id, "msg-a-last")
 
 
 if __name__ == "__main__":
