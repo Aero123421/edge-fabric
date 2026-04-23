@@ -1,0 +1,26 @@
+{
+  "schema_version": "v1",
+  "message_id": "01JEXAMPLELEASE0001",
+  "kind": "lease",
+  "priority": "control",
+  "site_id": "site-demo-001",
+  "occurred_at": "2026-04-23T12:00:00.500Z",
+  "source": {
+    "hardware_id": "site-router",
+    "session_id": "sess-router-01",
+    "seq_local": 3
+  },
+  "target": {
+    "type": "node",
+    "value": "hw-battery-001"
+  },
+  "payload": {
+    "role_lease_id": "lease-001",
+    "site_id": "site-demo-001",
+    "logical_binding_id": "node-leak-01",
+    "effective_role": "battery_leaf",
+    "primary_bearer": "lora",
+    "heartbeat_profile": "battery_sparse_v1",
+    "reporting_profile": "critical_sparse_v1"
+  }
+}

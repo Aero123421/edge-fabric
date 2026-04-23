@@ -1,0 +1,55 @@
+{
+  "version": "1.0.0",
+  "frame_types": {
+    "3": {
+      "name": "compact_binary_v1",
+      "wire_shape": "compact_v1"
+    },
+    "4": {
+      "name": "summary_binary_v1",
+      "wire_shape": "summary_v1"
+    }
+  },
+  "logical_kinds": {
+    "S": {
+      "kind": "state",
+      "shape_by_frame_type": {
+        "3": "state_compact_v1",
+        "4": "state_summary_v1"
+      }
+    },
+    "E": {
+      "kind": "event",
+      "shape_by_frame_type": {
+        "3": "event_summary_v1",
+        "4": "event_summary_v1"
+      }
+    },
+    "R": {
+      "kind": "command_result",
+      "shape_by_frame_type": {
+        "3": "command_result_compact_v1",
+        "4": "command_result_summary_v1"
+      }
+    },
+    "D": {
+      "kind": "pending_digest",
+      "ingest_behavior": "record_only"
+    },
+    "P": {
+      "kind": "tiny_poll",
+      "ingest_behavior": "record_only"
+    },
+    "H": {
+      "kind": "heartbeat",
+      "shape_by_frame_type": {
+        "3": "heartbeat_compact_v1",
+        "4": "heartbeat_summary_v1"
+      }
+    },
+    "C": {
+      "kind": "compact_command",
+      "ingest_behavior": "downlink_only"
+    }
+  }
+}

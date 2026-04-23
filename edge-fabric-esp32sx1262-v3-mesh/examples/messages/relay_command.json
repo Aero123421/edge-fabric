@@ -1,0 +1,26 @@
+{
+  "schema_version": "v1",
+  "message_id": "01JEXAMPLECMD0001",
+  "kind": "command",
+  "priority": "control",
+  "site_id": "site-demo-001",
+  "command_id": "01JEXAMPLERELAYCMD01",
+  "occurred_at": "2026-04-23T12:36:00.000Z",
+  "source": {
+    "hardware_id": "client-ui",
+    "session_id": "sess-ui-01",
+    "seq_local": 9
+  },
+  "target": {
+    "type": "node",
+    "value": "node-relay-001"
+  },
+  "payload": {
+    "command_name": "relay.set",
+    "args": {
+      "channel": 1,
+      "state": "on"
+    },
+    "expires_at": "2026-04-23T12:36:10.000Z"
+  }
+}

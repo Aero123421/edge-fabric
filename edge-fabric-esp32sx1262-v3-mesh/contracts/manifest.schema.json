@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NodeManifest",
+  "type": "object",
+  "required": [
+    "hardware_id",
+    "device_family",
+    "power_class",
+    "wake_class",
+    "supported_bearers",
+    "allowed_network_roles",
+    "firmware"
+  ],
+  "properties": {
+    "hardware_id": {
+      "type": "string"
+    },
+    "device_family": {
+      "type": "string"
+    },
+    "device_class": {
+      "type": "string"
+    },
+    "power_class": {
+      "type": "string",
+      "enum": [
+        "usb_powered",
+        "mains_powered",
+        "rechargeable_battery",
+        "primary_battery",
+        "energy_harvested"
+      ]
+    },
+    "wake_class": {
+      "type": "string",
+      "enum": [
+        "always_on",
+        "sleepy_periodic",
+        "sleepy_event",
+        "maintenance_awake"
+      ]
+    },
+    "supported_bearers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "lora",
+          "wifi_mesh",
+          "wifi_ip",
+          "wifi_lr",
+          "usb_cdc",
+          "ethernet",
+          "ble_maintenance"
+        ]
+      }
+    },
+    "allowed_network_roles": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "sleepy_leaf",
+          "powered_leaf",
+          "mesh_router",
+          "mesh_root",
+          "lora_relay",
+          "dual_bearer_bridge",
+          "gateway_head",
+          "site_router",
+          "controller_client"
+        ]
+      }
+    },
+    "relay_capabilities": {
+      "type": "object",
+      "properties": {
+        "can_relay_lora": {
+          "type": "boolean"
+        },
+        "can_route_wifi_mesh": {
+          "type": "boolean"
+        },
+        "max_lora_hops_supported": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "measurement_keys": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "command_support": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "actuator_classes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "maintenance_features": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "firmware": {
+      "type": "object",
+      "properties": {
+        "app": {
+          "type": "string"
+        },
+        "fabric": {
+          "type": "string"
+        },
+        "radio": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

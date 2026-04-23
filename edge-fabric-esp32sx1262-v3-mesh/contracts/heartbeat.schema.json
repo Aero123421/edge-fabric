@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HeartbeatPayload",
+  "type": "object",
+  "required": [
+    "heartbeat_kind",
+    "health"
+  ],
+  "properties": {
+    "heartbeat_kind": {
+      "type": "string",
+      "enum": [
+        "node",
+        "gateway",
+        "host",
+        "fabric_summary"
+      ]
+    },
+    "health": {
+      "type": "string",
+      "enum": [
+        "live",
+        "stale",
+        "offline",
+        "degraded",
+        "local_only",
+        "isolated",
+        "blocked"
+      ]
+    },
+    "queue_depth": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "battery_percent": {
+      "type": "number"
+    },
+    "selected_bearer": {
+      "type": "string"
+    },
+    "metrics": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

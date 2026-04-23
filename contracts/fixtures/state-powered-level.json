@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0.0",
+  "message_id": "msg-state-001",
+  "kind": "state",
+  "priority": "normal",
+  "occurred_at": "2026-04-23T08:01:00+00:00",
+  "source": {
+    "hardware_id": "powered-leaf-01",
+    "session_id": "sess-powered-01",
+    "seq_local": 77,
+    "fabric_short_id": 301,
+    "network_role": "powered_leaf"
+  },
+  "target": {
+    "kind": "service",
+    "value": "state"
+  },
+  "delivery": {
+    "route_class": "normal_state",
+    "allow_relay": false,
+    "allow_redundant": false,
+    "hop_limit": 0
+  },
+  "payload": {
+    "state_key": "tank.level",
+    "value": 72,
+    "unit": "percent"
+  }
+}

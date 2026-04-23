@@ -1,0 +1,5 @@
+profile,total_payload_cap_bytes,direct_uplink_overhead_bytes,relayed_uplink_overhead_bytes,direct_app_body_cap_bytes,relayed_app_body_cap_bytes
+JP125_LONG_SF10,24,14,18,10,6
+JP125_BAL_SF9,48,14,18,34,30
+JP250_FAST_SF8,80,14,18,66,62
+JP250_CTRL_SF9,64,14,18,50,46

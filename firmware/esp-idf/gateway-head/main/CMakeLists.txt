@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "gateway_head_backends.c"
+        "gateway_head_runtime.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        board_xiao_sx1262
+        fabric_proto
+        freertos
+        radio_hal_sx1262
+        usb_link
+)

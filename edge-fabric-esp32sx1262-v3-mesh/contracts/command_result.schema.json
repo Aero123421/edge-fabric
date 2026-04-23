@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CommandResultPayload",
+  "type": "object",
+  "required": [
+    "phase"
+  ],
+  "properties": {
+    "phase": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "executing",
+        "succeeded",
+        "failed",
+        "rejected",
+        "expired"
+      ]
+    },
+    "result": {
+      "type": "object"
+    },
+    "error_code": {
+      "type": "string"
+    },
+    "error_message": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

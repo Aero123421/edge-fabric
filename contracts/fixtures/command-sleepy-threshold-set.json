@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0.0",
+  "message_id": "msg-command-sleepy-001",
+  "kind": "command",
+  "priority": "control",
+  "command_id": "cmd-sleepy-threshold-001",
+  "occurred_at": "2099-04-23T08:02:00+00:00",
+  "source": {
+    "hardware_id": "controller-client-01",
+    "session_id": "sess-controller-01",
+    "seq_local": 5,
+    "fabric_short_id": 401,
+    "network_role": "controller_client"
+  },
+  "target": {
+    "kind": "node",
+    "value": "sleepy-leaf-01"
+  },
+  "delivery": {
+    "route_class": "sparse_summary",
+    "allow_relay": true,
+    "allow_redundant": false,
+    "hop_limit": 1,
+    "expires_at": "2099-04-23T08:12:00+00:00"
+  },
+  "payload": {
+    "command_name": "threshold.set",
+    "service_level": "eventual_next_poll",
+    "threshold": 42
+  }
+}

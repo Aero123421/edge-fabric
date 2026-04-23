@@ -1,0 +1,25 @@
+{
+  "schema_version": "v1",
+  "message_id": "01JEXAMPLECMDRES001",
+  "kind": "command_result",
+  "priority": "control",
+  "site_id": "site-demo-001",
+  "command_id": "01JEXAMPLERELAYCMD01",
+  "occurred_at": "2026-04-23T12:36:01.200Z",
+  "source": {
+    "hardware_id": "hw-powered-002",
+    "session_id": "sess-relay-01",
+    "seq_local": 11
+  },
+  "target": {
+    "type": "client",
+    "value": "client-ui-001"
+  },
+  "payload": {
+    "phase": "succeeded",
+    "result": {
+      "channel": 1,
+      "state": "on"
+    }
+  }
+}

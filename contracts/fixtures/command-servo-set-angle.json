@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0.0",
+  "message_id": "msg-command-001",
+  "kind": "command",
+  "priority": "control",
+  "command_id": "cmd-servo-001",
+  "occurred_at": "2026-04-23T08:02:00+00:00",
+  "source": {
+    "hardware_id": "controller-client-01",
+    "session_id": "sess-controller-01",
+    "seq_local": 5,
+    "fabric_short_id": 401,
+    "network_role": "controller_client"
+  },
+  "target": {
+    "kind": "node",
+    "value": "servo-node-01"
+  },
+  "delivery": {
+    "route_class": "immediate_local",
+    "allow_relay": false,
+    "allow_redundant": false,
+    "hop_limit": 0
+  },
+  "payload": {
+    "command_name": "servo.set_angle",
+    "angle": 90
+  }
+}

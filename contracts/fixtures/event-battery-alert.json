@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0.0",
+  "message_id": "msg-battery-001",
+  "kind": "event",
+  "priority": "critical",
+  "event_id": "evt-battery-001",
+  "occurred_at": "2026-04-23T08:00:00+00:00",
+  "source": {
+    "hardware_id": "battery-leaf-01",
+    "session_id": "sess-battery-01",
+    "seq_local": 10,
+    "fabric_short_id": 201,
+    "network_role": "sleepy_leaf"
+  },
+  "target": {
+    "kind": "service",
+    "value": "alerts"
+  },
+  "delivery": {
+    "route_class": "critical_alert",
+    "allow_relay": true,
+    "allow_redundant": true,
+    "hop_limit": 2
+  },
+  "payload": {
+    "alarm_code": "battery_low",
+    "severity": 2,
+    "battery_bucket": 1
+  }
+}

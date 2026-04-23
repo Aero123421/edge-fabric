@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "sleepy_leaf_backends.c"
+        "sleepy_leaf_main.c"
+        "sleepy_policy.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        board_xiao_sx1262
+        freertos
+        radio_hal_sx1262
+)

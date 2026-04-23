@@ -1,0 +1,13 @@
+{
+  "magic": "EF",
+  "version": 1,
+  "header_layout": [
+    "magic[2]",
+    "version[1]",
+    "frame_type[1]",
+    "payload_length_le[2]"
+  ],
+  "trailer_layout": [
+    "payload_crc32_le[4]"
+  ]
+}

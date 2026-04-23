@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0.0",
+  "message_id": "msg-0001",
+  "kind": "event",
+  "priority": "critical",
+  "event_id": "evt-0009",
+  "occurred_at": "2026-04-23T07:00:00Z",
+  "source": {
+    "hardware_id": "hw-xiao-sx1262-0001",
+    "session_id": "sess-a",
+    "seq_local": 19,
+    "fabric_short_id": 201,
+    "network_role": "sleepy_leaf"
+  },
+  "target": {
+    "kind": "service",
+    "value": "alerts"
+  },
+  "delivery": {
+    "route_class": "critical_alert",
+    "allow_relay": true,
+    "allow_redundant": true,
+    "hop_limit": 2
+  },
+  "mesh_meta": {
+    "mesh_domain_id": "domain-a",
+    "hop_count": 0,
+    "ingress_gateway_id": "gw-a"
+  },
+  "payload": {
+    "codec": "event_summary_v1",
+    "alarm_code": 5,
+    "severity": 3,
+    "battery_bucket": 4,
+    "value_short": 812
+  }
+}

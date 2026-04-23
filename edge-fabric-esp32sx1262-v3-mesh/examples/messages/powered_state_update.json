@@ -1,0 +1,22 @@
+{
+  "schema_version": "v1",
+  "message_id": "01JEXAMPLESTATE0001",
+  "kind": "state",
+  "priority": "normal",
+  "site_id": "site-demo-001",
+  "occurred_at": "2026-04-23T12:35:01.000Z",
+  "source": {
+    "hardware_id": "hw-powered-001",
+    "session_id": "sess-pwr-01",
+    "seq_local": 7
+  },
+  "target": {
+    "type": "service",
+    "value": "telemetry"
+  },
+  "payload": {
+    "state_key": "tank.level",
+    "value": 52.4,
+    "unit": "percent"
+  }
+}

@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.sqlite
+*.sqlite3
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.tools/
+bin/
+coverage.out
+*.spool*.jsonl
+*.rejected.jsonl

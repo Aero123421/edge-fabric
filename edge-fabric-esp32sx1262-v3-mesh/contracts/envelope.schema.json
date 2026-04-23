@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FabricEnvelope",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "message_id",
+    "kind",
+    "priority",
+    "source",
+    "target",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "message_id": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "priority": {
+      "type": "string",
+      "enum": [
+        "critical",
+        "control",
+        "normal",
+        "bulk"
+      ]
+    },
+    "event_id": {
+      "type": "string"
+    },
+    "command_id": {
+      "type": "string"
+    },
+    "correlation_id": {
+      "type": "string"
+    },
+    "occurred_at": {
+      "type": "string"
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "hardware_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "seq_local": {
+          "type": "integer"
+        },
+        "fabric_short_id": {
+          "type": "integer"
+        },
+        "network_role": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "node",
+            "group",
+            "service",
+            "host",
+            "client",
+            "site",
+            "broadcast"
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "delivery": {
+      "type": "object",
+      "properties": {
+        "route_class": {
+          "type": "string"
+        },
+        "allow_relay": {
+          "type": "boolean"
+        },
+        "allow_redundant": {
+          "type": "boolean"
+        },
+        "hop_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "expires_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "mesh_meta": {
+      "type": "object",
+      "properties": {
+        "mesh_domain_id": {
+          "type": "string"
+        },
+        "hop_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_hop": {
+          "type": "string"
+        },
+        "ingress_gateway_id": {
+          "type": "string"
+        },
+        "relay_trace": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "payload": {
+      "type": "object"
+    },
+    "ack": {
+      "type": "object",
+      "properties": {
+        "ack_phase": {
+          "type": "string"
+        },
+        "acked_message_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

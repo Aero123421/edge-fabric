@@ -1,0 +1,14 @@
+{
+  "role_lease_id": "lease-001",
+  "site_id": "site-a",
+  "logical_binding_id": "binding-battery-01",
+  "fabric_short_id": 201,
+  "effective_role": "sleepy_leaf",
+  "primary_bearer": "lora",
+  "preferred_gateways": [
+    "gw-1"
+  ],
+  "preferred_lora_parents": [
+    "relay-a"
+  ]
+}

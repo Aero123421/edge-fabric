@@ -1,0 +1,19 @@
+{
+  "hardware_id": "battery-leaf-01",
+  "device_family": "xiao-esp32s3-sx1262",
+  "device_class": "pir_sensor",
+  "power_class": "primary_battery",
+  "wake_class": "sleepy_event",
+  "supported_bearers": [
+    "lora",
+    "ble_maintenance"
+  ],
+  "allowed_network_roles": [
+    "sleepy_leaf"
+  ],
+  "firmware": {
+    "app": "0.1.0",
+    "fabric": "0.1.0",
+    "radio": "0.1.0"
+  }
+}

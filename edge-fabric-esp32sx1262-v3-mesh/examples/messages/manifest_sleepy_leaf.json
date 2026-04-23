@@ -1,0 +1,33 @@
+{
+  "hardware_id": "hw-xiao-sx1262-0001",
+  "device_family": "xiao_esp32s3_wio_sx1262",
+  "device_class": "pir_sensor",
+  "power_class": "primary_battery",
+  "wake_class": "sleepy_event",
+  "supported_bearers": [
+    "lora",
+    "ble_maintenance"
+  ],
+  "allowed_network_roles": [
+    "sleepy_leaf"
+  ],
+  "relay_capabilities": {
+    "can_relay_lora": false,
+    "can_route_wifi_mesh": false,
+    "max_lora_hops_supported": 0
+  },
+  "measurement_keys": [
+    "pir.triggered",
+    "battery.bucket"
+  ],
+  "command_support": [
+    "quiet_period.set",
+    "threshold_profile.set",
+    "alarm_latch.clear"
+  ],
+  "firmware": {
+    "app": "0.1.0",
+    "fabric": "0.3.0",
+    "radio": "0.2.0"
+  }
+}

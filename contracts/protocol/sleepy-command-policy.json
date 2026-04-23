@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "default_service_level": "eventual_next_poll",
+  "allowed_service_levels": [
+    "eventual_next_poll"
+  ],
+  "sleepy_safe_commands": [
+    "mode.set",
+    "threshold.set",
+    "quiet.set",
+    "alarm.clear",
+    "sampling.set"
+  ],
+  "maintenance_only_commands": [
+    "firmware.sync",
+    "diagnostics.upload",
+    "ota.begin"
+  ],
+  "maintenance_route_classes": [
+    "maintenance_sync"
+  ],
+  "compact_command_service_level": "ENP",
+  "compact_command_mode_requires_maintenance": [
+    "MAINT"
+  ]
+}

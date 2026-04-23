@@ -1,0 +1,30 @@
+{
+  "region_policy": "JP",
+  "cad_only_allowed": false,
+  "profiles": [
+    {
+      "name": "JP125_LONG_SF10",
+      "bandwidth_khz": 125,
+      "spreading_factor": 10,
+      "total_payload_cap": 24
+    },
+    {
+      "name": "JP125_BAL_SF9",
+      "bandwidth_khz": 125,
+      "spreading_factor": 9,
+      "total_payload_cap": 48
+    },
+    {
+      "name": "JP250_FAST_SF8",
+      "bandwidth_khz": 250,
+      "spreading_factor": 8,
+      "total_payload_cap": 80
+    },
+    {
+      "name": "JP250_CTRL_SF9",
+      "bandwidth_khz": 250,
+      "spreading_factor": 9,
+      "total_payload_cap": 64
+    }
+  ]
+}

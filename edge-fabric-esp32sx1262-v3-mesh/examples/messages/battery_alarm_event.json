@@ -1,0 +1,23 @@
+{
+  "schema_version": "v1",
+  "message_id": "01JEXAMPLEEVENT0001",
+  "kind": "event",
+  "priority": "critical",
+  "site_id": "site-demo-001",
+  "event_id": "01JEXAMPLELEAK0001",
+  "occurred_at": "2026-04-23T12:34:56.789Z",
+  "source": {
+    "hardware_id": "hw-battery-001",
+    "session_id": "sess-batt-01",
+    "seq_local": 42
+  },
+  "target": {
+    "type": "service",
+    "value": "alerts"
+  },
+  "payload": {
+    "event_name": "water_leak_detected",
+    "sensor_id": "leak-1",
+    "severity": "critical"
+  }
+}

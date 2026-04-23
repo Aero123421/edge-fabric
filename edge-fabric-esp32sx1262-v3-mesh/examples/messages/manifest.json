@@ -1,0 +1,36 @@
+{
+  "schema_version": "v1",
+  "message_id": "01JEXAMPLEMANIFEST01",
+  "kind": "manifest",
+  "priority": "normal",
+  "site_id": "site-demo-001",
+  "occurred_at": "2026-04-23T12:00:00.000Z",
+  "source": {
+    "hardware_id": "hw-battery-001",
+    "session_id": "sess-batt-01",
+    "seq_local": 1
+  },
+  "target": {
+    "type": "service",
+    "value": "provisioning"
+  },
+  "payload": {
+    "hardware_id": "hw-battery-001",
+    "device_family": "esp32sx1262",
+    "power_class": "battery",
+    "supported_bearers": [
+      "lora"
+    ],
+    "allowed_roles": [
+      "battery_leaf"
+    ],
+    "measurement_keys": [
+      "leak",
+      "battery.percent"
+    ],
+    "firmware": {
+      "app": "0.1.0",
+      "radio": "0.1.0"
+    }
+  }
+}

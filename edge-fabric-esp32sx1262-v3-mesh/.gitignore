@@ -1,0 +1,17 @@
+# host build outputs
+bin/
+dist/
+coverage/
+*.db
+*.db-shm
+*.db-wal
+
+# firmware
+build/
+sdkconfig
+sdkconfig.old
+
+# editor
+.DS_Store
+.vscode/
+.idea/

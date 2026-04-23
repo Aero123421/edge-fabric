@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "usb_frame_type": 2,
+  "gateway_heartbeat_fields": [
+    "gateway_id",
+    "live",
+    "status",
+    "value"
+  ],
+  "lora_compact_shapes": {
+    "3": "heartbeat_compact_v1",
+    "4": "heartbeat_summary_v1"
+  }
+}

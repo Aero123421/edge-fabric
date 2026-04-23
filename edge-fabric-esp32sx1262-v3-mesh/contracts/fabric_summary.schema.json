@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FabricSummaryPayload",
+  "type": "object",
+  "required": [
+    "site_id",
+    "health",
+    "gateway_count",
+    "node_count"
+  ],
+  "properties": {
+    "site_id": {
+      "type": "string"
+    },
+    "health": {
+      "type": "string"
+    },
+    "gateway_count": {
+      "type": "integer"
+    },
+    "node_count": {
+      "type": "integer"
+    },
+    "stale_count": {
+      "type": "integer"
+    },
+    "offline_count": {
+      "type": "integer"
+    },
+    "queued_count": {
+      "type": "integer"
+    },
+    "queue_lag_p95_ms": {
+      "type": "integer"
+    },
+    "oldest_queued_age_ms": {
+      "type": "integer"
+    },
+    "active_writer_id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

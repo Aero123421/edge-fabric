@@ -1,0 +1,5 @@
+profile,bw_khz,sf,total_payload_cap_bytes,intended,toa_ms,uplink_min_overhead_bytes,downlink_min_overhead_bytes,uplink_app_body_cap_bytes,downlink_app_body_cap_bytes
+JP125_LONG_SF10,125,10,24,critical alert / join-lite / summary heartbeat,370.688,14,16,10,8
+JP125_BAL_SF9,125,9,48,sparse state / event / result,308.224,14,16,34,32
+JP250_FAST_SF8,250,8,80,short-range powered fallback / bridge uplink,128.256,14,16,66,64
+JP250_CTRL_SF9,250,9,64,compact control / powered node fallback,195.072,14,16,50,48

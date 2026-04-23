@@ -1,0 +1,14 @@
+{
+  "persist_ack": [
+    "hop_accepted",
+    "persisted"
+  ],
+  "command_phase_ack": [
+    "accepted",
+    "executing",
+    "succeeded",
+    "failed",
+    "rejected",
+    "expired"
+  ]
+}

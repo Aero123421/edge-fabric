@@ -1,0 +1,27 @@
+{
+  "role_lease_id": "lease-0001",
+  "site_id": "site-demo-01",
+  "logical_binding_id": "pir-east-gate",
+  "fabric_short_id": 201,
+  "effective_role": "sleepy_leaf",
+  "primary_bearer": "lora",
+  "fallback_bearer": "none",
+  "preferred_gateways": [
+    "gw-a"
+  ],
+  "preferred_lora_parents": [
+    "relay-east-1",
+    "gw-a"
+  ],
+  "heartbeat_profile": "sleepy_piggyback_v1",
+  "reporting_profile": "pir_event_sparse_v1",
+  "route_profile": "sleepy_lora_direct_pref_v1",
+  "hop_budget": {
+    "max_lora_hops": 1,
+    "recommended_wifi_mesh_depth": 0
+  },
+  "maintenance_policy": {
+    "allow_wifi_maintenance": true,
+    "allow_ota": false
+  }
+}

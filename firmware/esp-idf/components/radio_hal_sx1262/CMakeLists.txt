@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "src/radio_hal_sx1262.c"
+        "src/lora_jp_policy.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        board_xiao_sx1262
+        freertos
+)

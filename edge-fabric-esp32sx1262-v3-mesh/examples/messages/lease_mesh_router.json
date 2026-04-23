@@ -1,0 +1,25 @@
+{
+  "role_lease_id": "lease-0100",
+  "site_id": "site-demo-01",
+  "logical_binding_id": "router-building-a-2f",
+  "fabric_short_id": 44,
+  "mesh_domain_id": "domain-a",
+  "effective_role": "mesh_router",
+  "primary_bearer": "wifi_mesh",
+  "fallback_bearer": "wifi_ip",
+  "preferred_mesh_roots": [
+    "root-a"
+  ],
+  "heartbeat_profile": "mesh_router_v1",
+  "reporting_profile": "router_health_v1",
+  "route_profile": "wifi_backbone_v1",
+  "hop_budget": {
+    "max_lora_hops": 0,
+    "recommended_wifi_mesh_depth": 4
+  },
+  "relay_policy": {
+    "allow_relay_for_others": false,
+    "beacon_interval_seconds": 0,
+    "hold_down_seconds": 30
+  }
+}

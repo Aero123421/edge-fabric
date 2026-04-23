@@ -1,0 +1,37 @@
+{
+  "hardware_id": "hw-xiao-sx1262-1001",
+  "device_family": "xiao_esp32s3_wio_sx1262",
+  "device_class": "bridge_router",
+  "power_class": "mains_powered",
+  "wake_class": "always_on",
+  "supported_bearers": [
+    "wifi_mesh",
+    "wifi_ip",
+    "lora"
+  ],
+  "allowed_network_roles": [
+    "powered_leaf",
+    "mesh_router",
+    "dual_bearer_bridge",
+    "lora_relay"
+  ],
+  "relay_capabilities": {
+    "can_relay_lora": true,
+    "can_route_wifi_mesh": true,
+    "max_lora_hops_supported": 2
+  },
+  "measurement_keys": [
+    "mesh.parent.state",
+    "relay.queue.depth",
+    "temperature"
+  ],
+  "command_support": [
+    "bridge.mode.set",
+    "route_hint.refresh"
+  ],
+  "firmware": {
+    "app": "0.1.0",
+    "fabric": "0.3.0",
+    "radio": "0.2.0"
+  }
+}

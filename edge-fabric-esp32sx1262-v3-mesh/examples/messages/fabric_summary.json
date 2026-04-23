@@ -1,0 +1,29 @@
+{
+  "schema_version": "v1",
+  "message_id": "01JEXAMPLESUMMARY001",
+  "kind": "fabric_summary",
+  "priority": "normal",
+  "site_id": "site-demo-001",
+  "occurred_at": "2026-04-23T12:40:00.000Z",
+  "source": {
+    "hardware_id": "site-router",
+    "session_id": "sess-router-01",
+    "seq_local": 100
+  },
+  "target": {
+    "type": "service",
+    "value": "summary"
+  },
+  "payload": {
+    "site_id": "site-demo-001",
+    "health": "live",
+    "gateway_count": 2,
+    "node_count": 11,
+    "stale_count": 1,
+    "offline_count": 0,
+    "queued_count": 0,
+    "queue_lag_p95_ms": 18,
+    "oldest_queued_age_ms": 0,
+    "active_writer_id": "router-main"
+  }
+}

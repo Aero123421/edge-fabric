@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RoleLease",
+  "type": "object",
+  "required": [
+    "role_lease_id",
+    "site_id",
+    "logical_binding_id",
+    "effective_role",
+    "primary_bearer"
+  ],
+  "properties": {
+    "role_lease_id": {
+      "type": "string"
+    },
+    "site_id": {
+      "type": "string"
+    },
+    "logical_binding_id": {
+      "type": "string"
+    },
+    "fabric_short_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "mesh_domain_id": {
+      "type": "string"
+    },
+    "effective_role": {
+      "type": "string"
+    },
+    "primary_bearer": {
+      "type": "string"
+    },
+    "fallback_bearer": {
+      "type": "string"
+    },
+    "preferred_gateways": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "preferred_mesh_roots": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "preferred_lora_parents": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "heartbeat_profile": {
+      "type": "string"
+    },
+    "reporting_profile": {
+      "type": "string"
+    },
+    "route_profile": {
+      "type": "string"
+    },
+    "hop_budget": {
+      "type": "object",
+      "properties": {
+        "max_lora_hops": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "recommended_wifi_mesh_depth": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "relay_policy": {
+      "type": "object",
+      "properties": {
+        "allow_relay_for_others": {
+          "type": "boolean"
+        },
+        "beacon_interval_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "hold_down_seconds": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "maintenance_policy": {
+      "type": "object",
+      "properties": {
+        "allow_wifi_maintenance": {
+          "type": "boolean"
+        },
+        "allow_ota": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}
