@@ -4,17 +4,17 @@
 
 ## Firmware
 
-- `gateway-head` と `node-sdk` は backend seam を持ちますが、実機 USB CDC / 実 SX1262 driver はまだ開発中です
-- app 起動時は TinyUSB が有効な build では real backend を優先しますが、prototype path の初期化に失敗した場合は **development backend** にフォールバックします
+- `gateway-head` と `node-sdk` は binary on-air frame を使い始めたが、実機 USB CDC / 実 SX1262 driver の compile と HIL はまだ未確認です
 - `node-sdk` 側は synthetic pending digest / tiny command で RX path smoke を 1 回たどれ、scripted smoke API で分岐も再現できます
 - `gateway-head` 側には TinyUSB CDC / SX1262 real backend の prototype がありますが、compile と HIL はまだ未確認です
 - `hop_buffered` heartbeat は local enqueue / handoff を意味し、actual radio TX completion は意味しません
-- `sleepy leaf` は sleepy-safe command を優先し、maintenance path の rich command / OTA はまだ限定的です
-- `maintenance_awake` は bounded cycle で自動解除されますが、完全な power-state orchestration まではまだありません
+- `sleepy leaf` は sleepy-safe compact command subset を優先し、rich event codec / OTA / maintenance transfer はまだ限定的です
+- `sleepy leaf` は light sleep まで入ったが、deep sleep / RTC wake / 完全な power-state orchestration まではまだありません
+- firmware 側の default identity は board MAC 由来になったが、lease/provisioning での正式上書きはまだ未実装です
 
 ## Routing
 
-- Go runtime では short ID / lease / payload-fit gate を先行実装したが、firmware 側の on-air binary と deep sleep 実装はまだ追随中です
+- Go runtime では short ID / lease / payload-fit gate を先行実装し、firmware 側も binary on-air と short ID に追随し始めたが、deep sleep と path-aware queue はまだ未完了です
 - `sleepy_tiny_control` の compact downlink は小さい command subset を優先し、rich payload / OTA / maintenance transfer はまだ summary / maintenance path 側です
 - `Wi-Fi mesh backbone`
 - `LoRa 1-relay / 2-relay`

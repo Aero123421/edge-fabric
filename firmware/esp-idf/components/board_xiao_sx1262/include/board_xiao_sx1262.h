@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "driver/gpio.h"
 #include "esp_err.h"
 
@@ -28,3 +31,5 @@ typedef struct {
 esp_err_t board_xiao_sx1262_init(void);
 esp_err_t board_xiao_sx1262_reset_lora(void);
 void board_xiao_sx1262_get_lora_pins(board_xiao_sx1262_lora_pins_t *pins);
+esp_err_t board_xiao_sx1262_format_identity(const char *prefix, char *out, size_t out_cap);
+esp_err_t board_xiao_sx1262_get_default_short_id(uint16_t *out_short_id);

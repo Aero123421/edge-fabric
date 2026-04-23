@@ -1,11 +1,12 @@
 #include "sleepy_policy.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
+#include "board_xiao_sx1262.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "fabric_proto/fabric_proto.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -24,31 +25,40 @@ static sleepy_policy_state_t s_state = {
     .applied_command = false,
     .maintenance_cycles_remaining = 0u,
     .maintenance_max_cycles = DEFAULT_MAINTENANCE_MAX_CYCLES,
+    .threshold_value = 0u,
+    .quiet_value = 0u,
+    .sampling_value = 0u,
+    .alarm_clear_seen = false,
+    .short_id = 0u,
+    .next_sequence = 0u,
+    .last_command_token = 0u,
     .last_command_id = "",
-    .node_id = "sleepy-leaf-01",
+    .node_id = "",
+    .recent_command_tokens = {0u, 0u, 0u, 0u},
+    .recent_command_cursor = 0u,
 };
 
+static esp_err_t sleepy_policy_ensure_lock(void);
+static esp_err_t sleepy_policy_configure_default_identity(void);
+static uint8_t sleepy_take_next_sequence_locked(void);
+static esp_err_t sleepy_send_tiny_poll(void);
+static esp_err_t sleepy_send_command_result(uint16_t command_token, uint8_t phase_token, uint8_t reason_token);
+static esp_err_t sleepy_send_terminal_command_result_once(
+    uint16_t command_token,
+    uint8_t phase_token,
+    uint8_t reason_token);
 static esp_err_t sleepy_open_downlink_window(uint32_t window_ms);
 static esp_err_t sleepy_handle_downlink_frame(const radio_hal_frame_t *frame, bool *extend_window);
-static int sleepy_extract_pending_count(const char *json);
-static bool sleepy_extract_string(const char *json, const char *key, char *out, size_t out_cap);
-static bool sleepy_contains(const char *json, const char *token);
-static esp_err_t sleepy_send_tiny_poll(void);
-static esp_err_t sleepy_send_command_result(const char *command_id, const char *phase, const char *reason);
-static esp_err_t sleepy_send_compact_payload(const char *payload);
-static int sleepy_extract_pending_digest_count(const char *payload);
-static bool sleepy_extract_token(const char *payload, int index, char *out, size_t out_cap);
-static bool sleepy_extract_int_field(const char *json, const char *key, int *out_value);
-static esp_err_t sleepy_policy_ensure_lock(void);
-static bool sleepy_recent_command_seen_locked(const char *command_id);
-static void sleepy_record_recent_command_locked(const char *command_id);
-static bool sleepy_json_command_allowed_while_sleepy(const char *command_name);
-static bool sleepy_json_command_requires_maintenance(const char *command_name, const char *route_class);
-static bool sleepy_is_duplicate_command(const char *command_id);
-static esp_err_t sleepy_send_terminal_command_result_once(const char *command_id, const char *phase, const char *reason);
+static bool sleepy_recent_command_seen_locked(uint16_t command_token);
+static void sleepy_record_recent_command_locked(uint16_t command_token);
+static bool sleepy_is_duplicate_command(uint16_t command_token);
 static void sleepy_enable_maintenance_locked(void);
 static void sleepy_disable_maintenance_locked(void);
 static void sleepy_finish_cycle_locked(void);
+static void sleepy_store_last_command_locked(uint16_t command_token);
+static const char *sleepy_phase_label(uint8_t phase_token);
+static const char *sleepy_reason_label(uint8_t reason_token);
+static esp_err_t sleepy_apply_compact_command(const ef_onair_compact_command_body_t *command);
 
 esp_err_t sleepy_policy_apply_defaults(void) {
     static const radio_hal_lora_profile_t profile = {
@@ -59,6 +69,7 @@ esp_err_t sleepy_policy_apply_defaults(void) {
     };
     ESP_RETURN_ON_ERROR(radio_hal_init(), TAG, "radio init failed");
     ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
+    ESP_RETURN_ON_ERROR(sleepy_policy_configure_default_identity(), TAG, "identity init failed");
     return radio_hal_apply_jp_safe_profile(&profile);
 }
 
@@ -78,7 +89,8 @@ esp_err_t sleepy_policy_run_cycle(void) {
     ESP_RETURN_ON_ERROR(sleepy_policy_get_state(&snapshot), TAG, "state snapshot failed");
     ESP_LOGI(
         TAG,
-        "cycle complete: digest=%s applied=%s last_command_id=%s",
+        "cycle complete: short_id=0x%04X digest=%s applied=%s last_command=%s",
+        snapshot.short_id,
         snapshot.saw_pending_digest ? "yes" : "no",
         snapshot.applied_command ? "yes" : "no",
         snapshot.last_command_id);
@@ -97,28 +109,41 @@ esp_err_t sleepy_policy_get_state(sleepy_policy_state_t *state) {
 }
 
 esp_err_t sleepy_policy_publish_state(const char *state_key, const char *value, bool event_wake) {
-    char compact[64];
-    snprintf(
-        compact,
-        sizeof(compact),
-        "S|%s|%s|%s|%c",
-        sleepy_policy_get_node_id(),
-        state_key != NULL ? state_key : "state",
-        value != NULL ? value : "",
-        event_wake ? '1' : '0');
-    return sleepy_send_compact_payload(compact);
+    ef_onair_state_body_t body;
+    uint8_t frame[32];
+    size_t frame_len = 0u;
+    uint8_t sequence;
+    uint16_t short_id;
+    if ((state_key == NULL || strcmp(state_key, "node.power") == 0) && value != NULL && strcmp(value, "awake") == 0) {
+        body.key_token = EF_ONAIR_STATE_KEY_NODE_POWER;
+        body.value_token = EF_ONAIR_STATE_VALUE_AWAKE;
+    } else if ((state_key == NULL || strcmp(state_key, "node.power") == 0) &&
+               value != NULL && strcmp(value, "sleep") == 0) {
+        body.key_token = EF_ONAIR_STATE_KEY_NODE_POWER;
+        body.value_token = EF_ONAIR_STATE_VALUE_SLEEP;
+    } else {
+        ESP_LOGW(TAG, "unsupported compact state key=%s value=%s", state_key, value);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    body.event_wake = event_wake;
+    ESP_RETURN_ON_ERROR(sleepy_policy_configure_default_identity(), TAG, "identity init failed");
+    ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    short_id = s_state.short_id;
+    sequence = sleepy_take_next_sequence_locked();
+    xSemaphoreGive(s_state_lock);
+    ESP_RETURN_ON_ERROR(
+        ef_onair_encode_state(short_id, false, sequence, &body, frame, sizeof(frame), &frame_len),
+        TAG,
+        "state encode failed");
+    return radio_hal_send_frame(frame, frame_len);
 }
 
 esp_err_t sleepy_policy_emit_event(const char *event_name, const char *value) {
-    char compact[64];
-    snprintf(
-        compact,
-        sizeof(compact),
-        "E|%s|%s|%s",
-        sleepy_policy_get_node_id(),
-        event_name != NULL ? event_name : "event",
-        value != NULL ? value : "");
-    return sleepy_send_compact_payload(compact);
+    (void)event_name;
+    (void)value;
+    ESP_LOGW(TAG, "binary compact event path is not implemented yet");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 esp_err_t sleepy_policy_set_maintenance_awake(bool enabled) {
@@ -153,6 +178,71 @@ const char *sleepy_policy_get_node_id(void) {
     return s_state.node_id;
 }
 
+esp_err_t sleepy_policy_set_short_id(uint16_t short_id) {
+    if (short_id == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    s_state.short_id = short_id;
+    xSemaphoreGive(s_state_lock);
+    return ESP_OK;
+}
+
+uint16_t sleepy_policy_get_short_id(void) {
+    return s_state.short_id;
+}
+
+static esp_err_t sleepy_policy_ensure_lock(void) {
+    if (s_state_lock != NULL) {
+        return ESP_OK;
+    }
+    s_state_lock = xSemaphoreCreateMutex();
+    if (s_state_lock == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t sleepy_policy_configure_default_identity(void) {
+    char derived_id[sizeof(s_state.node_id)];
+    uint16_t short_id;
+    esp_err_t err;
+    ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    if (s_state.node_id[0] != '\0' && s_state.short_id != 0u) {
+        xSemaphoreGive(s_state_lock);
+        return ESP_OK;
+    }
+    xSemaphoreGive(s_state_lock);
+    err = board_xiao_sx1262_format_identity("leaf", derived_id, sizeof(derived_id));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "falling back to local node identity: %s", esp_err_to_name(err));
+        snprintf(derived_id, sizeof(derived_id), "leaf-local");
+    }
+    err = board_xiao_sx1262_get_default_short_id(&short_id);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "falling back to local short id: %s", esp_err_to_name(err));
+        short_id = 1u;
+    }
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    if (s_state.node_id[0] == '\0') {
+        size_t length = strlen(derived_id);
+        memcpy(s_state.node_id, derived_id, length + 1u);
+    }
+    if (s_state.short_id == 0u) {
+        s_state.short_id = short_id;
+    }
+    xSemaphoreGive(s_state_lock);
+    return ESP_OK;
+}
+
+static uint8_t sleepy_take_next_sequence_locked(void) {
+    const uint8_t next = s_state.next_sequence;
+    s_state.next_sequence = (uint8_t)(s_state.next_sequence + 1u);
+    return next;
+}
+
 static esp_err_t sleepy_open_downlink_window(uint32_t window_ms) {
     radio_hal_frame_t frame;
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(window_ms);
@@ -178,408 +268,149 @@ static esp_err_t sleepy_open_downlink_window(uint32_t window_ms) {
 }
 
 static esp_err_t sleepy_handle_downlink_frame(const radio_hal_frame_t *frame, bool *extend_window) {
-    char payload[256];
-    int pending_count;
-    if (frame == NULL || frame->payload_len >= sizeof(payload)) {
+    ef_onair_packet_t packet;
+    if (frame == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     if (extend_window != NULL) {
         *extend_window = false;
     }
-    memcpy(payload, frame->payload, frame->payload_len);
-    payload[frame->payload_len] = '\0';
-
-    pending_count = sleepy_extract_pending_digest_count(payload);
-    if (pending_count >= 0 && payload[0] == 'D') {
-        ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
-        xSemaphoreTake(s_state_lock, portMAX_DELAY);
-        s_state.saw_pending_digest = pending_count > 0;
-        xSemaphoreGive(s_state_lock);
-        ESP_LOGI(TAG, "received pending digest token: count=%d", pending_count);
-        if (pending_count > 0) {
-            ESP_RETURN_ON_ERROR(sleepy_send_tiny_poll(), TAG, "tiny poll failed");
-            if (extend_window != NULL) {
-                *extend_window = true;
+    ESP_RETURN_ON_ERROR(ef_onair_decode_packet(frame->payload, frame->payload_len, &packet), TAG, "invalid on-air frame");
+    switch (packet.logical_type) {
+        case EF_ONAIR_TYPE_PENDING_DIGEST: {
+            ef_onair_pending_digest_body_t digest;
+            ESP_RETURN_ON_ERROR(ef_onair_decode_pending_digest(&packet, &digest), TAG, "pending digest decode failed");
+            ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
+            xSemaphoreTake(s_state_lock, portMAX_DELAY);
+            s_state.saw_pending_digest = digest.pending_count > 0u;
+            xSemaphoreGive(s_state_lock);
+            ESP_LOGI(TAG, "received pending digest: count=%u flags=0x%02X", digest.pending_count, digest.flags);
+            if (digest.pending_count > 0u) {
+                ESP_RETURN_ON_ERROR(sleepy_send_tiny_poll(), TAG, "tiny poll failed");
+                if (extend_window != NULL) {
+                    *extend_window = true;
+                }
             }
+            return ESP_OK;
         }
-        return ESP_OK;
-    }
-
-    pending_count = sleepy_extract_pending_count(payload);
-    if (pending_count >= 0) {
-        ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
-        xSemaphoreTake(s_state_lock, portMAX_DELAY);
-        s_state.saw_pending_digest = pending_count > 0;
-        xSemaphoreGive(s_state_lock);
-        ESP_LOGI(TAG, "received pending digest: count=%d", pending_count);
-        if (pending_count > 0) {
-            ESP_RETURN_ON_ERROR(sleepy_send_tiny_poll(), TAG, "tiny poll failed");
-            if (extend_window != NULL) {
-                *extend_window = true;
+        case EF_ONAIR_TYPE_COMPACT_COMMAND: {
+            ef_onair_compact_command_body_t command;
+            ESP_RETURN_ON_ERROR(ef_onair_decode_compact_command(&packet, &command), TAG, "compact command decode failed");
+            if (packet.target_short_id != 0u && packet.target_short_id != sleepy_policy_get_short_id()) {
+                ESP_LOGI(TAG, "ignoring compact command for another short_id=0x%04X", packet.target_short_id);
+                return ESP_OK;
             }
+            return sleepy_apply_compact_command(&command);
         }
-        return ESP_OK;
-    }
-
-    if (payload[0] == 'C' && sleepy_contains(payload, "|")) {
-        char token1[48] = "";
-        char token2[48] = "";
-        char command_id[48] = "";
-        char service_level[32] = "";
-        char mode[24] = "";
-        char expires_in_buf[16] = "";
-        const char *node_id = sleepy_policy_get_node_id();
-        bool stale = false;
-        sleepy_extract_token(payload, 1, token1, sizeof(token1));
-        sleepy_extract_token(payload, 2, token2, sizeof(token2));
-        if (strcmp(token1, node_id) == 0 || strcmp(token1, "all") == 0) {
-            strncpy(command_id, token2, sizeof(command_id) - 1u);
-            command_id[sizeof(command_id) - 1u] = '\0';
-            sleepy_extract_token(payload, 3, service_level, sizeof(service_level));
-            sleepy_extract_token(payload, 4, mode, sizeof(mode));
-            sleepy_extract_token(payload, 5, expires_in_buf, sizeof(expires_in_buf));
-        } else if (sleepy_extract_token(payload, 5, expires_in_buf, sizeof(expires_in_buf))) {
-            ESP_LOGI(TAG, "ignoring compact command for another node: %s", token1);
+        default:
+            ESP_LOGW(TAG, "ignoring unsupported on-air logical type=%u", packet.logical_type);
             return ESP_OK;
-        } else {
-            strncpy(command_id, token1, sizeof(command_id) - 1u);
-            command_id[sizeof(command_id) - 1u] = '\0';
-            sleepy_extract_token(payload, 2, service_level, sizeof(service_level));
-            sleepy_extract_token(payload, 3, mode, sizeof(mode));
-            sleepy_extract_token(payload, 4, expires_in_buf, sizeof(expires_in_buf));
-        }
-        stale = strcmp(mode, "STALE") == 0 || (expires_in_buf[0] != '\0' && strtol(expires_in_buf, NULL, 10) <= 0);
-        if (command_id[0] == '\0') {
-            return sleepy_send_command_result("missing", "rejected", "badcmd");
-        }
-        if (sleepy_is_duplicate_command(command_id)) {
-            ESP_LOGI(TAG, "duplicate compact command ignored before terminal result: %s", command_id);
-            return ESP_OK;
-        }
-        if (stale) {
-            return sleepy_send_terminal_command_result_once(command_id, "expired", "stale");
-        }
-        if (service_level[0] != '\0' && strcmp(service_level, "ENP") != 0) {
-            return sleepy_send_terminal_command_result_once(command_id, "rejected", "svc");
-        }
-        ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
-        xSemaphoreTake(s_state_lock, portMAX_DELAY);
-        if (strcmp(mode, "MAINT_ON") == 0) {
-            sleepy_enable_maintenance_locked();
-        } else if (strcmp(mode, "MAINT_OFF") == 0) {
-            sleepy_disable_maintenance_locked();
-        }
-        if (!s_state.maintenance_awake && strcmp(mode, "MAINT") == 0) {
-            xSemaphoreGive(s_state_lock);
-            return sleepy_send_terminal_command_result_once(command_id, "rejected", "maintenance");
-        }
-        s_state.applied_command = true;
-        strncpy(s_state.last_command_id, command_id, sizeof(s_state.last_command_id) - 1u);
-        s_state.last_command_id[sizeof(s_state.last_command_id) - 1u] = '\0';
-        sleepy_record_recent_command_locked(command_id);
-        xSemaphoreGive(s_state_lock);
-        return sleepy_send_command_result(command_id, "succeeded", "ok");
     }
-
-    if (sleepy_contains(payload, "\"command_name\"")) {
-        char command_id[48] = "";
-        char service_level[32] = "";
-        char command_name[48] = "";
-        char route_class[32] = "";
-        char mode_value[32] = "";
-        int expires_in_s = 1;
-        bool stale = sleepy_contains(payload, "\"stale\":true");
-        sleepy_extract_string(payload, "command_id", command_id, sizeof(command_id));
-        sleepy_extract_string(payload, "service_level", service_level, sizeof(service_level));
-        sleepy_extract_string(payload, "command_name", command_name, sizeof(command_name));
-        sleepy_extract_string(payload, "route_class", route_class, sizeof(route_class));
-        sleepy_extract_string(payload, "mode", mode_value, sizeof(mode_value));
-        if (sleepy_extract_int_field(payload, "expires_in_s", &expires_in_s) && expires_in_s <= 0) {
-            stale = true;
-        }
-        if (command_id[0] == '\0') {
-            return sleepy_send_command_result("missing", "rejected", "badcmd");
-        }
-        if (sleepy_is_duplicate_command(command_id)) {
-            ESP_LOGI(TAG, "duplicate json command ignored before terminal result: %s", command_id);
-            return ESP_OK;
-        }
-        if (stale) {
-            return sleepy_send_terminal_command_result_once(command_id, "expired", "stale command");
-        }
-        if (service_level[0] != '\0' && strcmp(service_level, "eventual_next_poll") != 0) {
-            return sleepy_send_terminal_command_result_once(command_id, "rejected", "unsupported service level");
-        }
-        ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
-        xSemaphoreTake(s_state_lock, portMAX_DELAY);
-        if (strcmp(command_name, "mode.set") == 0 && strcmp(mode_value, "maintenance_awake") == 0) {
-            sleepy_enable_maintenance_locked();
-        } else if (strcmp(command_name, "mode.set") == 0 && strcmp(mode_value, "deployed") == 0) {
-            sleepy_disable_maintenance_locked();
-        }
-        if (!s_state.maintenance_awake &&
-            sleepy_json_command_requires_maintenance(command_name, route_class)) {
-            xSemaphoreGive(s_state_lock);
-            return sleepy_send_terminal_command_result_once(command_id, "rejected", "maintenance");
-        }
-        if (!s_state.maintenance_awake && !sleepy_json_command_allowed_while_sleepy(command_name)) {
-            xSemaphoreGive(s_state_lock);
-            return sleepy_send_terminal_command_result_once(command_id, "rejected", "unsupported sleepy command");
-        }
-        s_state.applied_command = true;
-        strncpy(s_state.last_command_id, command_id, sizeof(s_state.last_command_id) - 1u);
-        s_state.last_command_id[sizeof(s_state.last_command_id) - 1u] = '\0';
-        sleepy_record_recent_command_locked(command_id);
-        xSemaphoreGive(s_state_lock);
-        return sleepy_send_command_result(command_id, "succeeded", "applied tiny command");
-    }
-
-    return ESP_OK;
-}
-
-static int sleepy_extract_pending_count(const char *json) {
-    const char *needle = "\"pending_count\":";
-    const char *start = strstr(json, needle);
-    if (start == NULL) {
-        return -1;
-    }
-    start += strlen(needle);
-    return (int)strtol(start, NULL, 10);
-}
-
-static bool sleepy_extract_string(const char *json, const char *key, char *out, size_t out_cap) {
-    char needle[48];
-    const char *start;
-    const char *end;
-    if (json == NULL || key == NULL || out == NULL || out_cap == 0u) {
-        return false;
-    }
-    snprintf(needle, sizeof(needle), "\"%s\":\"", key);
-    start = strstr(json, needle);
-    if (start == NULL) {
-        out[0] = '\0';
-        return false;
-    }
-    start += strlen(needle);
-    end = strchr(start, '"');
-    if (end == NULL) {
-        out[0] = '\0';
-        return false;
-    }
-    {
-        size_t length = (size_t)(end - start);
-        if (length >= out_cap) {
-            length = out_cap - 1u;
-        }
-        memcpy(out, start, length);
-        out[length] = '\0';
-    }
-    return true;
-}
-
-static bool sleepy_contains(const char *json, const char *token) {
-    return json != NULL && token != NULL && strstr(json, token) != NULL;
 }
 
 static esp_err_t sleepy_send_tiny_poll(void) {
-    char poll_json[64];
-    snprintf(poll_json, sizeof(poll_json), "P|%s|TP|ENP", sleepy_policy_get_node_id());
+    ef_onair_tiny_poll_body_t body = {
+        .service_level = EF_ONAIR_SERVICE_LEVEL_EVENTUAL_NEXT_POLL,
+    };
+    uint8_t frame[24];
+    size_t frame_len = 0u;
+    uint8_t sequence;
+    uint16_t short_id;
     ESP_LOGI(TAG, "sending explicit tiny poll");
-    return sleepy_send_compact_payload(poll_json);
+    ESP_RETURN_ON_ERROR(sleepy_policy_configure_default_identity(), TAG, "identity init failed");
+    ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    short_id = s_state.short_id;
+    sequence = sleepy_take_next_sequence_locked();
+    xSemaphoreGive(s_state_lock);
+    ESP_RETURN_ON_ERROR(
+        ef_onair_encode_tiny_poll(short_id, sequence, &body, frame, sizeof(frame), &frame_len),
+        TAG,
+        "tiny poll encode failed");
+    return radio_hal_send_frame(frame, frame_len);
 }
 
-static esp_err_t sleepy_send_command_result(const char *command_id, const char *phase, const char *reason) {
-    char json[96];
-    snprintf(
-        json,
-        sizeof(json),
-        "R|%s|%s|%s|%s",
-        sleepy_policy_get_node_id(),
-        command_id != NULL ? command_id : "",
-        phase,
-        reason);
-    return sleepy_send_compact_payload(json);
+static esp_err_t sleepy_send_command_result(uint16_t command_token, uint8_t phase_token, uint8_t reason_token) {
+    ef_onair_command_result_body_t body = {
+        .command_token = command_token,
+        .phase_token = phase_token,
+        .reason_token = reason_token,
+    };
+    uint8_t frame[24];
+    size_t frame_len = 0u;
+    uint8_t sequence;
+    uint16_t short_id;
+    ESP_RETURN_ON_ERROR(sleepy_policy_configure_default_identity(), TAG, "identity init failed");
+    ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    short_id = s_state.short_id;
+    sequence = sleepy_take_next_sequence_locked();
+    xSemaphoreGive(s_state_lock);
+    ESP_LOGI(
+        TAG,
+        "sending command result token=0x%04X phase=%s reason=%s",
+        command_token,
+        sleepy_phase_label(phase_token),
+        sleepy_reason_label(reason_token));
+    ESP_RETURN_ON_ERROR(
+        ef_onair_encode_command_result(short_id, false, sequence, &body, frame, sizeof(frame), &frame_len),
+        TAG,
+        "command result encode failed");
+    return radio_hal_send_frame(frame, frame_len);
 }
 
-static esp_err_t sleepy_send_compact_payload(const char *payload) {
-    if (payload == NULL) {
-        return ESP_ERR_INVALID_ARG;
+static esp_err_t sleepy_send_terminal_command_result_once(
+    uint16_t command_token,
+    uint8_t phase_token,
+    uint8_t reason_token) {
+    if (command_token == 0u) {
+        return sleepy_send_command_result(command_token, phase_token, reason_token);
     }
-    return radio_hal_send_frame((const uint8_t *)payload, strlen(payload));
-}
-
-static int sleepy_extract_pending_digest_count(const char *payload) {
-    char token1[32];
-    char token2[32];
-    char *end = NULL;
-    long parsed;
-    if (payload == NULL || payload[0] != 'D') {
-        return -1;
-    }
-    if (!sleepy_extract_token(payload, 1, token1, sizeof(token1))) {
-        return -1;
-    }
-    parsed = strtol(token1, &end, 10);
-    if (end != NULL && *end == '\0') {
-        return (int)parsed;
-    }
-    if (!sleepy_extract_token(payload, 2, token2, sizeof(token2))) {
-        return -1;
-    }
-    parsed = strtol(token2, &end, 10);
-    if (end == NULL || *end != '\0') {
-        return -1;
-    }
-    return (int)parsed;
-}
-
-static bool sleepy_extract_token(const char *payload, int index, char *out, size_t out_cap) {
-    const char *cursor = payload;
-    const char *next;
-    int current = 0;
-    if (payload == NULL || out == NULL || out_cap == 0u || index < 0) {
-        return false;
-    }
-    while (current < index && cursor != NULL) {
-        cursor = strchr(cursor, '|');
-        if (cursor == NULL) {
-            out[0] = '\0';
-            return false;
-        }
-        cursor++;
-        current++;
-    }
-    if (cursor == NULL) {
-        out[0] = '\0';
-        return false;
-    }
-    next = strchr(cursor, '|');
-    if (next == NULL) {
-        next = payload + strlen(payload);
-    }
-    {
-        size_t length = (size_t)(next - cursor);
-        if (length >= out_cap) {
-            length = out_cap - 1u;
-        }
-        memcpy(out, cursor, length);
-        out[length] = '\0';
-    }
-    return true;
-}
-
-static bool sleepy_extract_int_field(const char *json, const char *key, int *out_value) {
-    char needle[48];
-    const char *start;
-    if (json == NULL || key == NULL || out_value == NULL) {
-        return false;
-    }
-    snprintf(needle, sizeof(needle), "\"%s\":", key);
-    start = strstr(json, needle);
-    if (start == NULL) {
-        return false;
-    }
-    start += strlen(needle);
-    *out_value = (int)strtol(start, NULL, 10);
-    return true;
-}
-
-static esp_err_t sleepy_policy_ensure_lock(void) {
-    if (s_state_lock != NULL) {
+    ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    if (sleepy_recent_command_seen_locked(command_token)) {
+        xSemaphoreGive(s_state_lock);
+        ESP_LOGI(TAG, "duplicate terminal result suppressed: token=0x%04X", command_token);
         return ESP_OK;
     }
-    s_state_lock = xSemaphoreCreateMutex();
-    if (s_state_lock == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
+    sleepy_record_recent_command_locked(command_token);
+    xSemaphoreGive(s_state_lock);
+    return sleepy_send_command_result(command_token, phase_token, reason_token);
 }
 
-static bool sleepy_recent_command_seen_locked(const char *command_id) {
+static bool sleepy_recent_command_seen_locked(uint16_t command_token) {
     size_t index;
-    if (command_id == NULL || command_id[0] == '\0') {
+    if (command_token == 0u) {
         return false;
     }
-    for (index = 0; index < sizeof(s_state.recent_command_ids) / sizeof(s_state.recent_command_ids[0]); ++index) {
-        if (strcmp(command_id, s_state.recent_command_ids[index]) == 0) {
+    for (index = 0; index < sizeof(s_state.recent_command_tokens) / sizeof(s_state.recent_command_tokens[0]); ++index) {
+        if (command_token == s_state.recent_command_tokens[index]) {
             return true;
         }
     }
     return false;
 }
 
-static void sleepy_record_recent_command_locked(const char *command_id) {
-    if (command_id == NULL || command_id[0] == '\0') {
+static void sleepy_record_recent_command_locked(uint16_t command_token) {
+    if (command_token == 0u) {
         return;
     }
-    strncpy(
-        s_state.recent_command_ids[s_state.recent_command_cursor],
-        command_id,
-        sizeof(s_state.recent_command_ids[s_state.recent_command_cursor]) - 1u);
-    s_state.recent_command_ids[s_state.recent_command_cursor][sizeof(s_state.recent_command_ids[0]) - 1u] = '\0';
+    s_state.recent_command_tokens[s_state.recent_command_cursor] = command_token;
     s_state.recent_command_cursor =
         (uint8_t)((s_state.recent_command_cursor + 1u) %
-                  (sizeof(s_state.recent_command_ids) / sizeof(s_state.recent_command_ids[0])));
+                  (sizeof(s_state.recent_command_tokens) / sizeof(s_state.recent_command_tokens[0])));
 }
 
-static bool sleepy_json_command_allowed_while_sleepy(const char *command_name) {
-    static const char *const allowed[] = {
-        "mode.set",
-        "threshold.set",
-        "quiet.set",
-        "alarm.clear",
-        "sampling.set",
-    };
-    size_t index;
-    if (command_name == NULL || command_name[0] == '\0') {
-        return true;
-    }
-    for (index = 0; index < sizeof(allowed) / sizeof(allowed[0]); ++index) {
-        if (strcmp(command_name, allowed[index]) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool sleepy_json_command_requires_maintenance(const char *command_name, const char *route_class) {
-    if (route_class != NULL && strcmp(route_class, "maintenance_sync") == 0) {
-        return true;
-    }
-    if (command_name == NULL) {
-        return false;
-    }
-    return strcmp(command_name, "firmware.sync") == 0 ||
-           strcmp(command_name, "diagnostics.upload") == 0 ||
-           strcmp(command_name, "ota.begin") == 0;
-}
-
-static bool sleepy_is_duplicate_command(const char *command_id) {
+static bool sleepy_is_duplicate_command(uint16_t command_token) {
     bool seen;
-    if (command_id == NULL || command_id[0] == '\0') {
+    if (command_token == 0u) {
         return false;
     }
     ESP_ERROR_CHECK(sleepy_policy_ensure_lock());
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
-    seen = sleepy_recent_command_seen_locked(command_id);
+    seen = sleepy_recent_command_seen_locked(command_token);
     xSemaphoreGive(s_state_lock);
     return seen;
-}
-
-static esp_err_t sleepy_send_terminal_command_result_once(const char *command_id, const char *phase, const char *reason) {
-    if (command_id == NULL || command_id[0] == '\0') {
-        return sleepy_send_command_result(command_id, phase, reason);
-    }
-    ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
-    xSemaphoreTake(s_state_lock, portMAX_DELAY);
-    if (sleepy_recent_command_seen_locked(command_id)) {
-        xSemaphoreGive(s_state_lock);
-        ESP_LOGI(TAG, "duplicate terminal result suppressed: %s", command_id);
-        return ESP_OK;
-    }
-    sleepy_record_recent_command_locked(command_id);
-    xSemaphoreGive(s_state_lock);
-    return sleepy_send_command_result(command_id, phase, reason);
 }
 
 static void sleepy_enable_maintenance_locked(void) {
@@ -602,4 +433,103 @@ static void sleepy_finish_cycle_locked(void) {
     if (s_state.maintenance_cycles_remaining == 0u) {
         s_state.maintenance_awake = false;
     }
+}
+
+static void sleepy_store_last_command_locked(uint16_t command_token) {
+    int written;
+    s_state.last_command_token = command_token;
+    written = snprintf(s_state.last_command_id, sizeof(s_state.last_command_id), "tok-%04X", command_token);
+    if (written <= 0 || (size_t)written >= sizeof(s_state.last_command_id)) {
+        s_state.last_command_id[0] = '\0';
+    }
+}
+
+static const char *sleepy_phase_label(uint8_t phase_token) {
+    switch (phase_token) {
+        case EF_ONAIR_PHASE_ACCEPTED:
+            return "accepted";
+        case EF_ONAIR_PHASE_EXECUTING:
+            return "executing";
+        case EF_ONAIR_PHASE_SUCCEEDED:
+            return "succeeded";
+        case EF_ONAIR_PHASE_FAILED:
+            return "failed";
+        case EF_ONAIR_PHASE_REJECTED:
+            return "rejected";
+        case EF_ONAIR_PHASE_EXPIRED:
+            return "expired";
+        default:
+            return "unknown";
+    }
+}
+
+static const char *sleepy_reason_label(uint8_t reason_token) {
+    switch (reason_token) {
+        case EF_ONAIR_REASON_OK:
+            return "ok";
+        case EF_ONAIR_REASON_SERVICE:
+            return "service";
+        case EF_ONAIR_REASON_MAINTENANCE:
+            return "maintenance";
+        case EF_ONAIR_REASON_STALE:
+            return "stale";
+        case EF_ONAIR_REASON_BAD_COMMAND:
+            return "badcmd";
+        case EF_ONAIR_REASON_UNSUPPORTED:
+            return "unsupported";
+        default:
+            return "unknown";
+    }
+}
+
+static esp_err_t sleepy_apply_compact_command(const ef_onair_compact_command_body_t *command) {
+    if (command == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (command->command_token == 0u) {
+        return sleepy_send_command_result(0u, EF_ONAIR_PHASE_REJECTED, EF_ONAIR_REASON_BAD_COMMAND);
+    }
+    if (sleepy_is_duplicate_command(command->command_token)) {
+        ESP_LOGI(TAG, "duplicate compact command ignored before terminal result: token=0x%04X", command->command_token);
+        return ESP_OK;
+    }
+    if (command->expires_in_sec == 0u) {
+        return sleepy_send_terminal_command_result_once(
+            command->command_token,
+            EF_ONAIR_PHASE_EXPIRED,
+            EF_ONAIR_REASON_STALE);
+    }
+    ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    switch (command->command_kind) {
+        case EF_ONAIR_COMMAND_KIND_MAINTENANCE_ON:
+            sleepy_enable_maintenance_locked();
+            break;
+        case EF_ONAIR_COMMAND_KIND_MAINTENANCE_OFF:
+            sleepy_disable_maintenance_locked();
+            break;
+        case EF_ONAIR_COMMAND_KIND_THRESHOLD_SET:
+            s_state.threshold_value = command->argument;
+            break;
+        case EF_ONAIR_COMMAND_KIND_QUIET_SET:
+            s_state.quiet_value = command->argument;
+            break;
+        case EF_ONAIR_COMMAND_KIND_ALARM_CLEAR:
+            s_state.alarm_clear_seen = true;
+            break;
+        case EF_ONAIR_COMMAND_KIND_SAMPLING_SET:
+            s_state.sampling_value = command->argument;
+            break;
+        default:
+            xSemaphoreGive(s_state_lock);
+            return sleepy_send_terminal_command_result_once(
+                command->command_token,
+                EF_ONAIR_PHASE_REJECTED,
+                EF_ONAIR_REASON_UNSUPPORTED);
+    }
+    s_state.applied_command = true;
+    sleepy_store_last_command_locked(command->command_token);
+    sleepy_record_recent_command_locked(command->command_token);
+    xSemaphoreGive(s_state_lock);
+    return sleepy_send_command_result(command->command_token, EF_ONAIR_PHASE_SUCCEEDED, EF_ONAIR_REASON_OK);
 }

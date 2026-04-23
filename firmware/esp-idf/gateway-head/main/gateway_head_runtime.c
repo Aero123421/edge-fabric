@@ -1,4 +1,5 @@
 #include "fabric_proto/fabric_proto.h"
+#include "board_xiao_sx1262.h"
 #include "gateway_head_backends.h"
 #include "radio_hal_sx1262.h"
 #include "radio_hal_real_sx1262.h"
@@ -16,8 +17,8 @@
 #include "freertos/task.h"
 
 static const char *TAG = "gateway_head";
-static const char *GATEWAY_ID = "gw-01";
 static bool s_use_default_backends;
+static char s_gateway_id[32];
 
 static void gateway_head_runtime_task(void *arg);
 static esp_err_t gateway_send_heartbeat(const char *status, int extra_value);
@@ -25,7 +26,9 @@ static esp_err_t gateway_send_usb_frame(uint8_t frame_type, const uint8_t *paylo
 static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len);
 static esp_err_t gateway_handle_radio_frame(const radio_hal_frame_t *frame);
 static bool gateway_payload_is_json_object(const uint8_t *payload, size_t payload_len);
+static bool gateway_payload_is_legacy_compact(const uint8_t *payload, size_t payload_len);
 static uint8_t gateway_classify_radio_frame_type(const radio_hal_frame_t *frame);
+static esp_err_t gateway_head_runtime_ensure_identity(void);
 
 esp_err_t gateway_head_runtime_set_default_backends(bool enabled) {
     s_use_default_backends = enabled;
@@ -60,6 +63,7 @@ esp_err_t gateway_head_runtime_start(void) {
         .tx_power_dbm = 10u,
     };
     ESP_RETURN_ON_ERROR(gateway_head_runtime_init_transport(), TAG, "transport init failed");
+    ESP_RETURN_ON_ERROR(gateway_head_runtime_ensure_identity(), TAG, "identity init failed");
     if (s_use_default_backends) {
         ESP_RETURN_ON_ERROR(gateway_head_install_default_backends(), TAG, "backend install failed");
     }
@@ -132,6 +136,7 @@ esp_err_t gateway_head_runtime_poll_once(void) {
 static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len) {
     uint16_t payload_len;
     const uint8_t *payload;
+    ef_onair_packet_t packet;
     if (frame == NULL || frame_len < 10u) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -140,8 +145,17 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
     payload = &frame[6];
     switch (frame[3]) {
         case EF_USB_FRAME_ENVELOPE_JSON:
+            if (!gateway_payload_is_json_object(payload, payload_len)) {
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+            ESP_RETURN_ON_ERROR(radio_hal_send_frame(payload, payload_len), TAG, "LoRa TX failed");
+            return gateway_send_heartbeat("hop_buffered", (int)payload_len);
         case EF_USB_FRAME_COMPACT_BINARY:
         case EF_USB_FRAME_SUMMARY_BINARY:
+            if (ef_onair_decode_packet(payload, payload_len, &packet) != ESP_OK &&
+                !gateway_payload_is_legacy_compact(payload, payload_len)) {
+                return ESP_ERR_INVALID_RESPONSE;
+            }
             ESP_RETURN_ON_ERROR(radio_hal_send_frame(payload, payload_len), TAG, "LoRa TX failed");
             return gateway_send_heartbeat("hop_buffered", (int)payload_len);
         case EF_USB_FRAME_HEARTBEAT_JSON:
@@ -154,18 +168,23 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
 
 static esp_err_t gateway_handle_radio_frame(const radio_hal_frame_t *frame) {
     char status_json[160];
+    uint8_t frame_type;
     if (frame == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    frame_type = gateway_classify_radio_frame_type(frame);
+    if (frame_type == 0u) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
     ESP_RETURN_ON_ERROR(
-        gateway_send_usb_frame(gateway_classify_radio_frame_type(frame), frame->payload, frame->payload_len),
+        gateway_send_usb_frame(frame_type, frame->payload, frame->payload_len),
         TAG,
         "USB relay failed");
     snprintf(
         status_json,
         sizeof(status_json),
         "{\"gateway_id\":\"%s\",\"status\":\"lora_ingress\",\"rssi\":%d,\"snr\":%d}",
-        GATEWAY_ID,
+        s_gateway_id,
         (int)frame->rssi_dbm,
         (int)frame->snr_db);
     return gateway_send_usb_frame(EF_USB_FRAME_HEARTBEAT_JSON, (const uint8_t *)status_json, strlen(status_json));
@@ -177,7 +196,7 @@ static esp_err_t gateway_send_heartbeat(const char *status, int extra_value) {
         json,
         sizeof(json),
         "{\"gateway_id\":\"%s\",\"live\":true,\"status\":\"%s\",\"value\":%d}",
-        GATEWAY_ID,
+        s_gateway_id,
         status,
         extra_value);
     return gateway_send_usb_frame(EF_USB_FRAME_HEARTBEAT_JSON, (const uint8_t *)json, strlen(json));
@@ -209,18 +228,46 @@ static bool gateway_payload_is_json_object(const uint8_t *payload, size_t payloa
     return true;
 }
 
+static bool gateway_payload_is_legacy_compact(const uint8_t *payload, size_t payload_len) {
+    size_t index;
+    if (payload == NULL || payload_len < 3u) {
+        return false;
+    }
+    if (!(payload[0] >= 'A' && payload[0] <= 'Z') || payload[1] != '|') {
+        return false;
+    }
+    for (index = 0; index < payload_len; ++index) {
+        if (payload[index] == '\0') {
+            return false;
+        }
+    }
+    return true;
+}
+
 static uint8_t gateway_classify_radio_frame_type(const radio_hal_frame_t *frame) {
+    ef_onair_packet_t packet;
     if (frame == NULL || frame->payload_len == 0u) {
-        return EF_USB_FRAME_SUMMARY_BINARY;
+        return 0u;
+    }
+    if (ef_onair_decode_packet(frame->payload, frame->payload_len, &packet) == ESP_OK) {
+        return (packet.flags & EF_ONAIR_FLAG_SUMMARY) != 0u ? EF_USB_FRAME_SUMMARY_BINARY : EF_USB_FRAME_COMPACT_BINARY;
     }
     if (gateway_payload_is_json_object(frame->payload, frame->payload_len)) {
         return EF_USB_FRAME_ENVELOPE_JSON;
     }
-    if (frame->payload_len >= 2u &&
-        frame->payload[1] == '|' &&
-        frame->payload[0] >= 'A' &&
-        frame->payload[0] <= 'Z') {
+    if (gateway_payload_is_legacy_compact(frame->payload, frame->payload_len)) {
         return EF_USB_FRAME_COMPACT_BINARY;
     }
-    return EF_USB_FRAME_SUMMARY_BINARY;
+    return 0u;
+}
+
+static esp_err_t gateway_head_runtime_ensure_identity(void) {
+    if (s_gateway_id[0] != '\0') {
+        return ESP_OK;
+    }
+    if (board_xiao_sx1262_format_identity("gw", s_gateway_id, sizeof(s_gateway_id)) != ESP_OK) {
+        snprintf(s_gateway_id, sizeof(s_gateway_id), "gw-local");
+        ESP_LOGW(TAG, "falling back to local gateway identity");
+    }
+    return ESP_OK;
 }

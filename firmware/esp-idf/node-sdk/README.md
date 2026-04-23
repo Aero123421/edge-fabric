@@ -6,6 +6,7 @@
 
 - JP-safe LoRa profile を適用する
 - wake cycle を繰り返す最小 loop を持つ
+- binary on-air frame を使って short ID で uplink/downlink する
 - uplink 後に bounded RX window を開く
 - pending command digest を受ける
 - tiny poll を返す
@@ -14,20 +15,23 @@
 
 現段階の制約:
 
-- JSON command は `contracts/protocol/sleepy-command-policy.json` の sleepy-safe command を優先する
-- compact downlink は `ENP` service level と bounded mode token を前提にした最小実装
-- `maintenance_sync` と maintenance-only command は `maintenance_awake` 前提
-- `mode.set` の `maintenance_awake` / `deployed` で maintenance flag を切り替えられる
+- compact downlink は binary on-air の bounded command kind を前提にした最小実装
+- `maintenance_sync` や rich maintenance transfer はまだ未実装で、compact command path には入っていない
+- board MAC 由来の default node ID / short ID を使う。lease/provisioning 上書きはまだ未実装
+- compact state uplink は現時点では `node.power` の `awake/sleep` に絞っている
+- compact event uplink は未実装で、必要時は別 bearer へ逃がす前提
+- scripted backend の compact command は `MAINT_ON` / `MAINT_OFF` / `ALARM_CLEAR` / `THRESHOLD_10` / `QUIET_1` / `SAMPLING_5` に絞っている
 - `maintenance_awake` は bounded で、既定では数 cycle 後に自動で解除される
-- duplicate command は小さな recent ring で抑止し、same terminal result を乱発しない
+- duplicate command は `command_token` の小さな recent ring で抑止し、same terminal result を乱発しない
 - `sleepy_policy_set_node_id(...)` で runtime の node ID を差し替えられる
+- `sleepy_policy_set_short_id(...)` で runtime の short ID を差し替えられる
 - downlink backend は `radio_hal_service()` で差し込まれる前提
 
 default development backend:
 
 - uplink を見ると 1 回だけ synthetic pending digest を返す
 - tiny poll を見ると 1 回だけ synthetic sleepy command を返す
-- 実機 downlink driver ではなく、RX path smoke 用の最小 backend
+- 実機 downlink driver ではなく、binary on-air RX path smoke 用の最小 backend
 - smoke 完了後は synthetic pending / command を再発しない
 - `sleepy_leaf_backend_set_auto_smoke(false)` で auto success path を止められる
 - `sleepy_leaf_backend_script_pending_digest(...)` / `sleepy_leaf_backend_script_compact_command(...)` で

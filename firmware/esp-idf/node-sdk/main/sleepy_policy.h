@@ -13,9 +13,16 @@ typedef struct {
     bool applied_command;
     uint8_t maintenance_cycles_remaining;
     uint8_t maintenance_max_cycles;
+    uint8_t threshold_value;
+    uint8_t quiet_value;
+    uint8_t sampling_value;
+    bool alarm_clear_seen;
+    uint16_t short_id;
+    uint8_t next_sequence;
+    uint16_t last_command_token;
     char last_command_id[48];
     char node_id[48];
-    char recent_command_ids[4][48];
+    uint16_t recent_command_tokens[4];
     uint8_t recent_command_cursor;
 } sleepy_policy_state_t;
 
@@ -27,3 +34,5 @@ esp_err_t sleepy_policy_set_maintenance_awake(bool enabled);
 esp_err_t sleepy_policy_get_state(sleepy_policy_state_t *state);
 esp_err_t sleepy_policy_set_node_id(const char *node_id);
 const char *sleepy_policy_get_node_id(void);
+esp_err_t sleepy_policy_set_short_id(uint16_t short_id);
+uint16_t sleepy_policy_get_short_id(void);

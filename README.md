@@ -80,7 +80,7 @@ PowerShell:
 .\.tools\go-sdk\bin\go.exe test ./...
 .\.tools\go-sdk\bin\go.exe run .\cmd\site-router -op doctor
 .\.tools\go-sdk\bin\go.exe run .\cmd\site-router -op issue-command -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
-.\.tools\go-sdk\bin\go.exe run .\cmd\site-router -op pending-digest -hardware-id sleepy-leaf-01
+.\.tools\go-sdk\bin\go.exe run .\cmd\site-router -op pending-digest -hardware-id <leaf-hardware-id>
 .\.tools\go-sdk\bin\go.exe run .\cmd\host-agent -mode direct-json -input .\contracts\fixtures\event-battery-alert.json
 .\.tools\go-sdk\bin\go.exe run .\cmd\host-agent -mode diagnostics
 .\.tools\go-sdk\bin\go.exe run .\cmd\direct-slice-demo
@@ -140,6 +140,9 @@ idf.py build
 
 この workspace では `idf.py` / `IDF_PATH` が未導入な場合があります。
 その場合、repo 側では contract / demo / doctor / known limitations を先に維持し、実機 build は ESP-IDF 環境で追います。
+
+firmware 側の default identity は board MAC 由来で、`gw-XXXXXX` / `leaf-XXXXXX` と short ID を暫定生成します。
+正式な site lease / provisioning 上書きは今後の実装対象です。
 
 ## いま試せるもの
 
