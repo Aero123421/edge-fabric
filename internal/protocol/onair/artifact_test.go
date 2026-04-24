@@ -51,7 +51,10 @@ func TestOnAirArtifactStaysInSync(t *testing.T) {
 	if artifact.LogicalTypes["3"].Name != "command_result" || artifact.LogicalTypes["3"].ImplementationStatus != "active" {
 		t.Fatalf("unexpected command_result entry: %+v", artifact.LogicalTypes["3"])
 	}
-	if artifact.LogicalTypes["7"].ImplementationStatus != "reserved" {
-		t.Fatalf("heartbeat logical type must stay reserved until helpers land: %+v", artifact.LogicalTypes["7"])
+	if artifact.LogicalTypes["2"].Name != "event" || artifact.LogicalTypes["2"].ImplementationStatus != "active" {
+		t.Fatalf("unexpected event entry: %+v", artifact.LogicalTypes["2"])
+	}
+	if artifact.LogicalTypes["7"].Name != "heartbeat" || artifact.LogicalTypes["7"].ImplementationStatus != "active" {
+		t.Fatalf("unexpected heartbeat entry: %+v", artifact.LogicalTypes["7"])
 	}
 }

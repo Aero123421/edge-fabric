@@ -55,6 +55,25 @@ typedef enum {
 } ef_onair_state_value_t;
 
 typedef enum {
+    EF_ONAIR_EVENT_CODE_BATTERY_LOW = 1,
+    EF_ONAIR_EVENT_CODE_MOTION_DETECTED = 2,
+    EF_ONAIR_EVENT_CODE_LEAK_DETECTED = 3,
+    EF_ONAIR_EVENT_CODE_TAMPER = 4,
+    EF_ONAIR_EVENT_CODE_THRESHOLD_CROSSED = 5,
+} ef_onair_event_code_t;
+
+typedef enum {
+    EF_ONAIR_EVENT_SEVERITY_INFO = 1,
+    EF_ONAIR_EVENT_SEVERITY_WARNING = 2,
+    EF_ONAIR_EVENT_SEVERITY_CRITICAL = 3,
+} ef_onair_event_severity_t;
+
+typedef enum {
+    EF_ONAIR_EVENT_FLAG_EVENT_WAKE = 1u << 0,
+    EF_ONAIR_EVENT_FLAG_LATCHED = 1u << 1,
+} ef_onair_event_flag_t;
+
+typedef enum {
     EF_ONAIR_COMMAND_KIND_MAINTENANCE_ON = 1,
     EF_ONAIR_COMMAND_KIND_MAINTENANCE_OFF = 2,
     EF_ONAIR_COMMAND_KIND_THRESHOLD_SET = 3,
@@ -90,6 +109,18 @@ typedef enum {
     EF_ONAIR_PENDING_FLAG_EXPIRES_SOON = 1u << 1,
 } ef_onair_pending_flag_t;
 
+typedef enum {
+    EF_ONAIR_HEARTBEAT_HEALTH_OK = 1,
+    EF_ONAIR_HEARTBEAT_HEALTH_DEGRADED = 2,
+    EF_ONAIR_HEARTBEAT_HEALTH_CRITICAL = 3,
+} ef_onair_heartbeat_health_t;
+
+typedef enum {
+    EF_ONAIR_HEARTBEAT_FLAG_EVENT_WAKE = 1u << 0,
+    EF_ONAIR_HEARTBEAT_FLAG_MAINTENANCE_AWAKE = 1u << 1,
+    EF_ONAIR_HEARTBEAT_FLAG_LOW_POWER = 1u << 2,
+} ef_onair_heartbeat_flag_t;
+
 typedef struct {
     uint8_t version;
     uint8_t logical_type;
@@ -106,6 +137,13 @@ typedef struct {
     uint8_t value_token;
     bool event_wake;
 } ef_onair_state_body_t;
+
+typedef struct {
+    uint8_t event_code;
+    uint8_t severity;
+    uint8_t value_bucket;
+    uint8_t flags;
+} ef_onair_event_body_t;
 
 typedef struct {
     uint16_t command_token;
@@ -128,6 +166,14 @@ typedef struct {
     uint8_t argument;
     uint8_t expires_in_sec;
 } ef_onair_compact_command_body_t;
+
+typedef struct {
+    uint8_t health;
+    uint8_t battery_bucket;
+    uint8_t link_quality;
+    uint8_t uptime_bucket;
+    uint8_t flags;
+} ef_onair_heartbeat_body_t;
 
 esp_err_t ef_usb_frame_validate(const uint8_t *frame, size_t frame_len);
 esp_err_t ef_usb_frame_encode(
@@ -164,6 +210,16 @@ esp_err_t ef_onair_encode_state(
     size_t out_buf_cap,
     size_t *out_len);
 esp_err_t ef_onair_decode_state(const ef_onair_packet_t *packet, ef_onair_state_body_t *out_body);
+
+esp_err_t ef_onair_encode_event(
+    uint16_t source_short_id,
+    bool summary,
+    uint8_t sequence,
+    const ef_onair_event_body_t *body,
+    uint8_t *out_buf,
+    size_t out_buf_cap,
+    size_t *out_len);
+esp_err_t ef_onair_decode_event(const ef_onair_packet_t *packet, ef_onair_event_body_t *out_body);
 
 esp_err_t ef_onair_encode_command_result(
     uint16_t source_short_id,
@@ -209,3 +265,13 @@ esp_err_t ef_onair_encode_compact_command(
 esp_err_t ef_onair_decode_compact_command(
     const ef_onair_packet_t *packet,
     ef_onair_compact_command_body_t *out_body);
+
+esp_err_t ef_onair_encode_heartbeat(
+    uint16_t source_short_id,
+    bool summary,
+    uint8_t sequence,
+    const ef_onair_heartbeat_body_t *body,
+    uint8_t *out_buf,
+    size_t out_buf_cap,
+    size_t *out_len);
+esp_err_t ef_onair_decode_heartbeat(const ef_onair_packet_t *packet, ef_onair_heartbeat_body_t *out_body);

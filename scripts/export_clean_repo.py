@@ -7,7 +7,15 @@ import zipfile
 from pathlib import Path
 
 
-FORBIDDEN_PREFIXES = (".tools/", ".tmp/", ".pytest_cache/")
+FORBIDDEN_PREFIXES = (
+    ".tools/",
+    ".tmp/",
+    ".pytest_cache/",
+    ".artifacts/",
+    "__pycache__/",
+    "dist/",
+    "build/",
+)
 FORBIDDEN_FILES = (
     ".tmp-host-agent.db",
     ".tmp-site-router.db",
@@ -19,17 +27,25 @@ FORBIDDEN_FILES = (
     "sleepy-cycle-demo.spool.heartbeat.json",
     "host-agent-spool.heartbeat.json",
 )
+FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".egg-info", ".egg-info/")
+FORBIDDEN_PATH_PARTS = (".egg-info/",)
 
 
 def validate_export(output: Path) -> None:
     with zipfile.ZipFile(output) as archive:
         names = archive.namelist()
     for prefix in FORBIDDEN_PREFIXES:
-        if any(name == prefix or name.startswith(prefix) for name in names):
+        if any(name == prefix or name.startswith(prefix) or f"/{prefix}" in name for name in names):
             raise RuntimeError(f"forbidden export prefix detected: {prefix}")
     for filename in FORBIDDEN_FILES:
         if any(name == filename or name.endswith("/" + filename) for name in names):
             raise RuntimeError(f"forbidden export file detected: {filename}")
+    for suffix in FORBIDDEN_SUFFIXES:
+        if any(name.endswith(suffix) for name in names):
+            raise RuntimeError(f"forbidden export suffix detected: {suffix}")
+    for path_part in FORBIDDEN_PATH_PARTS:
+        if any(path_part in name for name in names):
+            raise RuntimeError(f"forbidden export path component detected: {path_part}")
 
 def ensure_clean_worktree(root: Path) -> None:
     result = subprocess.run(

@@ -2,7 +2,7 @@
   "version": "1.0.0",
   "track": "legacy_reference",
   "scope": "gateway-heartbeat-json-and-legacy-compact-heartbeat-shapes",
-  "mainline_onair_status": "reserved",
+  "mainline_onair_status": "active",
   "usb_frame_type": 2,
   "gateway_json_shapes": {
     "status_heartbeat_v1": [

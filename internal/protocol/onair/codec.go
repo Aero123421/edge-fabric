@@ -11,19 +11,32 @@ const (
 
 	FlagSummary byte = 1 << 0
 
-	TypeState         byte = 1
-	TypeEvent         byte = 2
-	TypeCommandResult byte = 3
-	TypePendingDigest byte = 4
-	TypeTinyPoll      byte = 5
+	TypeState          byte = 1
+	TypeEvent          byte = 2
+	TypeCommandResult  byte = 3
+	TypePendingDigest  byte = 4
+	TypeTinyPoll       byte = 5
 	TypeCompactCommand byte = 6
-	TypeHeartbeat     byte = 7
+	TypeHeartbeat      byte = 7
 
 	StateKeyNodePower byte = 1
 
 	StateValueUnknown byte = 0
 	StateValueAwake   byte = 1
 	StateValueSleep   byte = 2
+
+	EventCodeBatteryLow       byte = 1
+	EventCodeMotionDetected   byte = 2
+	EventCodeLeakDetected     byte = 3
+	EventCodeTamper           byte = 4
+	EventCodeThresholdCrossed byte = 5
+
+	EventSeverityInfo     byte = 1
+	EventSeverityWarning  byte = 2
+	EventSeverityCritical byte = 3
+
+	EventFlagEventWake byte = 1 << 0
+	EventFlagLatched   byte = 1 << 1
 
 	CommandKindMaintenanceOn  byte = 1
 	CommandKindMaintenanceOff byte = 2
@@ -50,6 +63,14 @@ const (
 
 	PendingFlagUrgent      byte = 1 << 0
 	PendingFlagExpiresSoon byte = 1 << 1
+
+	HeartbeatHealthOK       byte = 1
+	HeartbeatHealthDegraded byte = 2
+	HeartbeatHealthCritical byte = 3
+
+	HeartbeatFlagEventWake        byte = 1 << 0
+	HeartbeatFlagMaintenanceAwake byte = 1 << 1
+	HeartbeatFlagLowPower         byte = 1 << 2
 )
 
 const HeaderSize = 8
@@ -65,9 +86,16 @@ type Packet struct {
 }
 
 type StateBody struct {
-	KeyToken  byte
+	KeyToken   byte
 	ValueToken byte
-	EventWake bool
+	EventWake  bool
+}
+
+type EventBody struct {
+	EventCode   byte
+	Severity    byte
+	ValueBucket byte
+	Flags       byte
 }
 
 type CommandResultBody struct {
@@ -90,6 +118,14 @@ type CompactCommandBody struct {
 	CommandKind  byte
 	Argument     byte
 	ExpiresInSec byte
+}
+
+type HeartbeatBody struct {
+	Health        byte
+	BatteryBucket byte
+	LinkQuality   byte
+	UptimeBucket  byte
+	Flags         byte
 }
 
 func Encode(packet Packet) ([]byte, error) {
@@ -161,6 +197,36 @@ func DecodeState(packet *Packet) (*StateBody, error) {
 		KeyToken:   packet.Body[0],
 		ValueToken: packet.Body[1],
 		EventWake:  packet.Body[2] != 0,
+	}, nil
+}
+
+func EncodeEvent(sourceShortID uint16, summary bool, body EventBody) ([]byte, error) {
+	flags := byte(0)
+	if summary {
+		flags |= FlagSummary
+	}
+	return Encode(Packet{
+		LogicalType:   TypeEvent,
+		Flags:         flags,
+		SourceShortID: sourceShortID,
+		Body: []byte{
+			body.EventCode,
+			body.Severity,
+			body.ValueBucket,
+			body.Flags,
+		},
+	})
+}
+
+func DecodeEvent(packet *Packet) (*EventBody, error) {
+	if packet == nil || packet.LogicalType != TypeEvent || len(packet.Body) != 4 {
+		return nil, errors.New("invalid event frame")
+	}
+	return &EventBody{
+		EventCode:   packet.Body[0],
+		Severity:    packet.Body[1],
+		ValueBucket: packet.Body[2],
+		Flags:       packet.Body[3],
 	}, nil
 }
 
@@ -260,6 +326,38 @@ func DecodeCompactCommand(packet *Packet) (*CompactCommandBody, error) {
 		CommandKind:  packet.Body[2],
 		Argument:     packet.Body[3],
 		ExpiresInSec: packet.Body[4],
+	}, nil
+}
+
+func EncodeHeartbeat(sourceShortID uint16, summary bool, body HeartbeatBody) ([]byte, error) {
+	flags := byte(0)
+	if summary {
+		flags |= FlagSummary
+	}
+	return Encode(Packet{
+		LogicalType:   TypeHeartbeat,
+		Flags:         flags,
+		SourceShortID: sourceShortID,
+		Body: []byte{
+			body.Health,
+			body.BatteryBucket,
+			body.LinkQuality,
+			body.UptimeBucket,
+			body.Flags,
+		},
+	})
+}
+
+func DecodeHeartbeat(packet *Packet) (*HeartbeatBody, error) {
+	if packet == nil || packet.LogicalType != TypeHeartbeat || len(packet.Body) != 5 {
+		return nil, errors.New("invalid heartbeat frame")
+	}
+	return &HeartbeatBody{
+		Health:        packet.Body[0],
+		BatteryBucket: packet.Body[1],
+		LinkQuality:   packet.Body[2],
+		UptimeBucket:  packet.Body[3],
+		Flags:         packet.Body[4],
 	}, nil
 }
 

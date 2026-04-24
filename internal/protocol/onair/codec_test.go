@@ -76,3 +76,59 @@ func TestPendingDigestRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected digest: %+v", body)
 	}
 }
+
+func TestEventRoundTrip(t *testing.T) {
+	raw, err := EncodeEvent(201, false, EventBody{
+		EventCode:   EventCodeMotionDetected,
+		Severity:    EventSeverityCritical,
+		ValueBucket: 9,
+		Flags:       EventFlagEventWake | EventFlagLatched,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.LogicalType != TypeEvent || packet.SourceShortID != 201 {
+		t.Fatalf("unexpected event header: %+v", packet)
+	}
+	body, err := DecodeEvent(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.EventCode != EventCodeMotionDetected || body.Severity != EventSeverityCritical ||
+		body.ValueBucket != 9 || body.Flags != (EventFlagEventWake|EventFlagLatched) {
+		t.Fatalf("unexpected event body: %+v", body)
+	}
+}
+
+func TestHeartbeatRoundTrip(t *testing.T) {
+	raw, err := EncodeHeartbeat(201, true, HeartbeatBody{
+		Health:        HeartbeatHealthDegraded,
+		BatteryBucket: 81,
+		LinkQuality:   42,
+		UptimeBucket:  7,
+		Flags:         HeartbeatFlagLowPower | HeartbeatFlagMaintenanceAwake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.LogicalType != TypeHeartbeat || !packet.Summary() {
+		t.Fatalf("unexpected heartbeat header: %+v", packet)
+	}
+	body, err := DecodeHeartbeat(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.Health != HeartbeatHealthDegraded || body.BatteryBucket != 81 ||
+		body.LinkQuality != 42 || body.UptimeBucket != 7 ||
+		body.Flags != (HeartbeatFlagLowPower|HeartbeatFlagMaintenanceAwake) {
+		t.Fatalf("unexpected heartbeat body: %+v", body)
+	}
+}

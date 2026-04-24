@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -18,13 +19,23 @@ def load_json(path: Path) -> dict:
         raise RuntimeError(f"Invalid JSON in {path}: {exc}") from exc
 
 
-def optional_tool_version(command: list[str]) -> str:
+TOOL_TIMEOUT_SECONDS = 5
+
+
+def optional_tool_version(command: list[str], env: dict[str, str] | None = None) -> str:
     executable = shutil.which(command[0])
     if executable is None:
         return "missing"
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-    except OSError:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=TOOL_TIMEOUT_SECONDS,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return "error"
     if result.returncode != 0:
         return "error"
@@ -117,7 +128,9 @@ def main(argv: list[str] | None = None) -> int:
     if sys.version_info < (3, 12):
         print("Python 3.12+ is required")
         return 1
-    go_version = optional_tool_version(["go", "version"])
+    go_env = dict(os.environ)
+    go_env["GOTOOLCHAIN"] = "local"
+    go_version = optional_tool_version(["go", "version"], env=go_env)
     idf_version = optional_tool_version(["idf.py", "--version"])
     print(f"Go: {go_version}")
     print(f"idf.py: {idf_version}")

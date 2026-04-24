@@ -130,6 +130,28 @@ func TestRouterFailureSpools(t *testing.T) {
 	}
 }
 
+func TestRouterFailureReportsSpoolWriteFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	agent := New(failingRouter{}, tempDir)
+	envelope := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-spool-fail-001",
+		Kind:          "event",
+		Priority:      "critical",
+		EventID:       "evt-spool-fail-001",
+		Source:        contracts.SourceRef{HardwareID: "battery-02"},
+		Target:        contracts.TargetRef{Kind: "service", Value: "alerts"},
+		Payload:       map[string]any{"alarm_code": "water"},
+	}
+	result, err := agent.RelayDirectIP(context.Background(), "wifi-direct-fail", "wifi-session-fail", envelope, nil)
+	if err == nil {
+		t.Fatal("expected spool write error")
+	}
+	if result == nil || result.Status != "spool_failed" {
+		t.Fatalf("expected spool_failed result, got %+v", result)
+	}
+}
+
 func TestHeartbeatIsPersistedAndStoredForDiagnostics(t *testing.T) {
 	agent, router := openAgentAndRouter(t)
 	frame, err := EncodeHeartbeatFrame(map[string]any{"gateway_id": "gw-01", "live": true, "status": "live"})
@@ -156,6 +178,38 @@ func TestHeartbeatIsPersistedAndStoredForDiagnostics(t *testing.T) {
 	}
 	if diag["spool_records"].(int) != 0 {
 		t.Fatalf("expected no spool records, got %v", diag["spool_records"])
+	}
+}
+
+func TestOnAirHeartbeatRelaysIntoRouter(t *testing.T) {
+	agent, router := openAgentAndRouter(t)
+	wire, err := onair.EncodeHeartbeat(201, false, onair.HeartbeatBody{
+		Health:        onair.HeartbeatHealthDegraded,
+		BatteryBucket: 77,
+		LinkQuality:   41,
+		UptimeBucket:  5,
+		Flags:         onair.HeartbeatFlagLowPower,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := usbcdc.EncodeFrame(FrameCompactBinary, wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.RelayUSBFrame(context.Background(), "gateway-usb-heartbeat", "heartbeat-session-02", frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "persisted" {
+		t.Fatalf("unexpected status: %s", result.Status)
+	}
+	record, err := router.LatestHeartbeat(context.Background(), "short:201")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record == nil || record.Status != "onair_heartbeat" || record.Payload["health"] != "degraded" {
+		t.Fatalf("heartbeat was not persisted into router: %+v", record)
 	}
 }
 
@@ -330,10 +384,75 @@ func TestDecodeCompactSummaryPreservesWireShape(t *testing.T) {
 }
 
 func TestSummaryEventRelaysIntoRouter(t *testing.T) {
-	t.Skip("event compact path is being redesigned around tokenized on-air frames")
+	agent, router := openAgentAndRouter(t)
+	wire, err := onair.EncodeEvent(201, true, onair.EventBody{
+		EventCode:   onair.EventCodeMotionDetected,
+		Severity:    onair.EventSeverityCritical,
+		ValueBucket: 3,
+		Flags:       onair.EventFlagEventWake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := usbcdc.EncodeFrame(FrameSummaryBinary, wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.RelayUSBFrame(context.Background(), "gateway-usb-summary", "summary-session-event", frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "persisted" {
+		t.Fatalf("unexpected status: %s", result.Status)
+	}
+	count, err := router.CountEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 compact event, got %d", count)
+	}
 }
 
-func TestDigestAndPollFramesAreRecordedOnly(t *testing.T) {
+func TestRepeatedOnAirEventsUseShortWindowDuplicateCache(t *testing.T) {
+	agent, router := openAgentAndRouter(t)
+	wire, err := onair.EncodeEvent(201, false, onair.EventBody{
+		EventCode:   onair.EventCodeMotionDetected,
+		Severity:    onair.EventSeverityWarning,
+		ValueBucket: 8,
+		Flags:       onair.EventFlagEventWake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := usbcdc.EncodeFrame(FrameCompactBinary, wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := agent.RelayUSBFrame(context.Background(), "gateway-usb-event", "event-session-repeat", frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != "persisted" {
+		t.Fatalf("unexpected first status: %s", first.Status)
+	}
+	second, err := agent.RelayUSBFrame(context.Background(), "gateway-usb-event", "event-session-repeat", frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Status != "duplicate_onair" {
+		t.Fatalf("unexpected duplicate status: %s", second.Status)
+	}
+	count, err := router.CountEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected immediate duplicate on-air event to be suppressed, got %d", count)
+	}
+}
+
+func TestDigestAndPollFramesBecomeControlHeartbeats(t *testing.T) {
 	agent, router := openAgentAndRouter(t)
 	digestRaw, err := onair.EncodePendingDigest(201, true, onair.PendingDigestBody{PendingCount: 1, Flags: onair.PendingFlagUrgent})
 	if err != nil {
@@ -343,10 +462,15 @@ func TestDigestAndPollFramesAreRecordedOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest := mustOnAir(t, digestRaw, nil)
-	poll := mustOnAir(t, pollRaw, nil)
-	for _, payload := range [][]byte{digest, poll} {
-		frame, err := usbcdc.EncodeFrame(FrameSummaryBinary, payload)
+	frames := []struct {
+		frameType byte
+		payload   []byte
+	}{
+		{frameType: FrameSummaryBinary, payload: mustOnAir(t, digestRaw, nil)},
+		{frameType: FrameCompactBinary, payload: mustOnAir(t, pollRaw, nil)},
+	}
+	for _, item := range frames {
+		frame, err := usbcdc.EncodeFrame(item.frameType, item.payload)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -354,7 +478,7 @@ func TestDigestAndPollFramesAreRecordedOnly(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Status != "digest_recorded" && result.Status != "poll_recorded" {
+		if result.Status != "persisted" {
 			t.Fatalf("unexpected status: %s", result.Status)
 		}
 	}
@@ -365,11 +489,41 @@ func TestDigestAndPollFramesAreRecordedOnly(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("expected 0 events after record-only frames, got %d", count)
 	}
+	record, err := router.LatestHeartbeat(context.Background(), "short:201")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record == nil || record.Status != "tiny_poll" {
+		t.Fatalf("expected latest tiny_poll heartbeat, got %+v", record)
+	}
 }
 
 func TestInvalidCompactPayloadRejected(t *testing.T) {
 	if _, _, err := decodeCompactSummaryEnvelope(context.Background(), nil, FrameCompactBinary, []byte{1, 2, 3}); err == nil {
 		t.Fatal("expected invalid compact payload error")
+	}
+}
+
+func TestUSBFrameTypeMustMatchOnAirSummaryFlag(t *testing.T) {
+	summaryWire, err := onair.EncodeState(201, true, onair.StateBody{
+		KeyToken:   onair.StateKeyNodePower,
+		ValueToken: onair.StateValueAwake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := decodeCompactSummaryEnvelope(context.Background(), nil, FrameCompactBinary, summaryWire); err == nil {
+		t.Fatal("expected compact USB frame carrying summary on-air packet to be rejected")
+	}
+	compactWire, err := onair.EncodeState(201, false, onair.StateBody{
+		KeyToken:   onair.StateKeyNodePower,
+		ValueToken: onair.StateValueAwake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := decodeCompactSummaryEnvelope(context.Background(), nil, FrameSummaryBinary, compactWire); err == nil {
+		t.Fatal("expected summary USB frame carrying compact on-air packet to be rejected")
 	}
 }
 

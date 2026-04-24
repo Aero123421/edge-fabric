@@ -4,6 +4,7 @@
   "header": {
     "version": 1,
     "size_bytes": 8,
+    "sequence_semantics": "8-bit short-term duplicate hint scoped by source_short_id/logical_type/body hash; not a global message id",
     "fields": [
       "version",
       "logical_type",
@@ -25,9 +26,9 @@
     },
     "2": {
       "name": "event",
-      "body_size_bytes": null,
+      "body_size_bytes": 4,
       "summary_supported": true,
-      "implementation_status": "reserved"
+      "implementation_status": "active"
     },
     "3": {
       "name": "command_result",
@@ -55,10 +56,21 @@
     },
     "7": {
       "name": "heartbeat",
-      "body_size_bytes": null,
+      "body_size_bytes": 5,
       "summary_supported": true,
-      "implementation_status": "reserved"
+      "implementation_status": "active"
     }
+  },
+  "relay_extension": {
+    "version": "relay_extension_v1",
+    "implementation_status": "planned",
+    "fields": [
+      "origin_short_id_le16",
+      "previous_hop_short_id_le16",
+      "ttl",
+      "hop_count",
+      "route_hint"
+    ]
   },
   "state": {
     "keys": {
@@ -68,6 +80,49 @@
       "0": "unknown",
       "1": "awake",
       "2": "sleep"
+    }
+  },
+  "event": {
+    "body_layout": [
+      "event_code:u8",
+      "severity:u8",
+      "value_bucket:u8",
+      "flags:u8"
+    ],
+    "codes": {
+      "1": "battery_low",
+      "2": "motion_detected",
+      "3": "leak_detected",
+      "4": "tamper",
+      "5": "threshold_crossed"
+    },
+    "severity": {
+      "1": "info",
+      "2": "warning",
+      "3": "critical"
+    },
+    "flags": {
+      "1": "event_wake",
+      "2": "latched"
+    }
+  },
+  "heartbeat": {
+    "body_layout": [
+      "health:u8",
+      "battery_bucket:u8",
+      "link_quality:u8",
+      "uptime_bucket:u8",
+      "flags:u8"
+    ],
+    "health": {
+      "1": "ok",
+      "2": "degraded",
+      "3": "critical"
+    },
+    "flags": {
+      "1": "event_wake",
+      "2": "maintenance_awake",
+      "4": "low_power"
     }
   },
   "compact_command": {

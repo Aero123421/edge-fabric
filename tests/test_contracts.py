@@ -87,8 +87,19 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(artifact["header"]["version"], 1)
         self.assertEqual(artifact["header"]["size_bytes"], 8)
         self.assertEqual(artifact["logical_types"]["1"]["name"], "state")
+        self.assertEqual(artifact["logical_types"]["2"]["implementation_status"], "active")
         self.assertEqual(artifact["logical_types"]["3"]["name"], "command_result")
-        self.assertEqual(artifact["logical_types"]["7"]["implementation_status"], "reserved")
+        self.assertEqual(artifact["logical_types"]["7"]["implementation_status"], "active")
+        self.assertIn("sequence_semantics", artifact["header"])
+        self.assertEqual(artifact["relay_extension"]["implementation_status"], "planned")
+        self.assertEqual(
+            artifact["event"]["body_layout"],
+            ["event_code:u8", "severity:u8", "value_bucket:u8", "flags:u8"],
+        )
+        self.assertEqual(
+            artifact["heartbeat"]["body_layout"],
+            ["health:u8", "battery_bucket:u8", "link_quality:u8", "uptime_bucket:u8", "flags:u8"],
+        )
 
     def test_onair_artifact_matches_go_and_firmware_constants(self) -> None:
         artifact = self._load_json("contracts/protocol/onair-v1.json")
@@ -173,6 +184,39 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(int(key), c_value(const_name))
 
         for key, const_name in {
+            "1": "EventCodeBatteryLow",
+            "2": "EventCodeMotionDetected",
+            "3": "EventCodeLeakDetected",
+            "4": "EventCodeTamper",
+            "5": "EventCodeThresholdCrossed",
+        }.items():
+            self.assertEqual(int(key), go_byte(const_name))
+        for key, const_name in {
+            "1": "EF_ONAIR_EVENT_CODE_BATTERY_LOW",
+            "2": "EF_ONAIR_EVENT_CODE_MOTION_DETECTED",
+            "3": "EF_ONAIR_EVENT_CODE_LEAK_DETECTED",
+            "4": "EF_ONAIR_EVENT_CODE_TAMPER",
+            "5": "EF_ONAIR_EVENT_CODE_THRESHOLD_CROSSED",
+        }.items():
+            self.assertEqual(int(key), c_value(const_name))
+        for key, const_name in {
+            "1": "EventSeverityInfo",
+            "2": "EventSeverityWarning",
+            "3": "EventSeverityCritical",
+        }.items():
+            self.assertEqual(int(key), go_byte(const_name))
+        for key, const_name in {
+            "1": "EF_ONAIR_EVENT_SEVERITY_INFO",
+            "2": "EF_ONAIR_EVENT_SEVERITY_WARNING",
+            "3": "EF_ONAIR_EVENT_SEVERITY_CRITICAL",
+        }.items():
+            self.assertEqual(int(key), c_value(const_name))
+        self.assertEqual(int("1"), go_byte("EventFlagEventWake"))
+        self.assertEqual(int("2"), go_byte("EventFlagLatched"))
+        self.assertEqual(int("1"), c_value("EF_ONAIR_EVENT_FLAG_EVENT_WAKE"))
+        self.assertEqual(int("2"), c_value("EF_ONAIR_EVENT_FLAG_LATCHED"))
+
+        for key, const_name in {
             "1": "CommandKindMaintenanceOn",
             "2": "CommandKindMaintenanceOff",
             "3": "CommandKindThresholdSet",
@@ -241,6 +285,24 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(int("2"), go_byte("PendingFlagExpiresSoon"))
         self.assertEqual(int("1"), c_value("EF_ONAIR_PENDING_FLAG_URGENT"))
         self.assertEqual(int("2"), c_value("EF_ONAIR_PENDING_FLAG_EXPIRES_SOON"))
+        for key, const_name in {
+            "1": "HeartbeatHealthOK",
+            "2": "HeartbeatHealthDegraded",
+            "3": "HeartbeatHealthCritical",
+        }.items():
+            self.assertEqual(int(key), go_byte(const_name))
+        for key, const_name in {
+            "1": "EF_ONAIR_HEARTBEAT_HEALTH_OK",
+            "2": "EF_ONAIR_HEARTBEAT_HEALTH_DEGRADED",
+            "3": "EF_ONAIR_HEARTBEAT_HEALTH_CRITICAL",
+        }.items():
+            self.assertEqual(int(key), c_value(const_name))
+        self.assertEqual(int("1"), go_byte("HeartbeatFlagEventWake"))
+        self.assertEqual(int("2"), go_byte("HeartbeatFlagMaintenanceAwake"))
+        self.assertEqual(int("4"), go_byte("HeartbeatFlagLowPower"))
+        self.assertEqual(int("1"), c_value("EF_ONAIR_HEARTBEAT_FLAG_EVENT_WAKE"))
+        self.assertEqual(int("2"), c_value("EF_ONAIR_HEARTBEAT_FLAG_MAINTENANCE_AWAKE"))
+        self.assertEqual(int("4"), c_value("EF_ONAIR_HEARTBEAT_FLAG_LOW_POWER"))
 
     def test_sleepy_command_policy_artifact_covers_fixtures(self) -> None:
         policy = self._load_json("contracts/protocol/sleepy-command-policy.json")
@@ -272,7 +334,7 @@ class ContractTests(unittest.TestCase):
             ROOT / "firmware" / "esp-idf" / "gateway-head" / "main" / "gateway_head_runtime.c"
         ).read_text(encoding="utf-8")
         self.assertEqual(artifact["track"], "legacy_reference")
-        self.assertEqual(artifact["mainline_onair_status"], "reserved")
+        self.assertEqual(artifact["mainline_onair_status"], "active")
         self.assertEqual(artifact["usb_frame_type"], 2)
         self.assertEqual(
             artifact["gateway_json_shapes"]["status_heartbeat_v1"],

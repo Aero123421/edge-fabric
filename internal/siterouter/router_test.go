@@ -513,6 +513,36 @@ func TestSleepyTinyControlRequiresLeaseAndShortID(t *testing.T) {
 	if _, _, err := router.IssueCommand(ctx, command, "local", ""); err != nil {
 		t.Fatalf("expected sleepy_tiny_control planning to pass, got %v", err)
 	}
+	plan, err := router.PlanOutboundRoute(ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Bearer != "lora_direct" || plan.PathLabel != "sleepy_tiny_control/direct" || !plan.PayloadFit {
+		t.Fatalf("unexpected sleepy route plan: %+v", plan)
+	}
+	if plan.Detail["target_short_id"].(int) != 204 {
+		t.Fatalf("expected target short id detail, got %+v", plan.Detail)
+	}
+}
+
+func TestUnsupportedRouteClassIsRejected(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	command := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-command-route-bad",
+		Kind:          "command",
+		Priority:      "control",
+		CommandID:     "cmd-route-bad",
+		OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Source:        contracts.SourceRef{HardwareID: "controller-bad-route"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "powered-bad-route"},
+		Delivery:      &contracts.DeliverySpec{RouteClass: "unknown_mesh_magic"},
+		Payload:       map[string]any{"command_name": "relay.toggle"},
+	}
+	if _, err := router.EnqueueOutbound(ctx, command, ""); err == nil {
+		t.Fatal("expected unsupported route_class to be rejected")
+	}
 }
 
 func TestDuplicateCommandResultSamePhaseIsIdempotent(t *testing.T) {

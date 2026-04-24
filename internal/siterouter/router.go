@@ -97,6 +97,19 @@ type OutboundAttempt struct {
 	UpdatedAt string         `json:"updated_at"`
 }
 
+type RoutePlan struct {
+	RouteClass     string         `json:"route_class,omitempty"`
+	Bearer         string         `json:"bearer,omitempty"`
+	GatewayID      string         `json:"gateway_id,omitempty"`
+	PathLabel      string         `json:"path_label,omitempty"`
+	AllowRelay     bool           `json:"allow_relay"`
+	AllowRedundant bool           `json:"allow_redundant"`
+	HopLimit       *int           `json:"hop_limit,omitempty"`
+	PayloadFit     bool           `json:"payload_fit"`
+	Reason         string         `json:"reason"`
+	Detail         map[string]any `json:"detail,omitempty"`
+}
+
 type NodeRuntimeInfo struct {
 	HardwareID string              `json:"hardware_id"`
 	Manifest   *contracts.Manifest `json:"manifest,omitempty"`
@@ -972,36 +985,74 @@ func (r *Router) validateOutboundEnvelope(ctx context.Context, envelope *contrac
 	if envelope == nil || envelope.Kind != "command" || envelope.Target.Kind != "node" {
 		return nil
 	}
+	_, err := r.PlanOutboundRoute(ctx, envelope)
+	return err
+}
+
+func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Envelope) (*RoutePlan, error) {
+	if envelope == nil {
+		return nil, contracts.NewValidationError("route planning requires envelope")
+	}
+	plan := &RoutePlan{
+		RouteClass:     deliveryRouteClass(envelope.Delivery),
+		AllowRelay:     deliveryBool(envelope.Delivery, "allow_relay"),
+		AllowRedundant: deliveryBool(envelope.Delivery, "allow_redundant"),
+		HopLimit:       deliveryHopLimit(envelope.Delivery),
+		PayloadFit:     true,
+		Reason:         "default",
+		Detail:         map[string]any{"message_id": envelope.MessageID, "target_kind": envelope.Target.Kind},
+	}
+	if envelope.Target.Kind != "node" {
+		plan.Bearer = "host_local"
+		plan.PathLabel = "non_node_target"
+		return plan, nil
+	}
 	info, err := r.RuntimeInfoForNode(ctx, envelope.Target.Value)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if info.Lease != nil && info.Manifest != nil {
 		if err := validateLeaseAgainstManifest(info.Lease, info.Manifest); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	routeClass := ""
-	if envelope.Delivery != nil {
-		routeClass = envelope.Delivery.RouteClass
+	if plan.RouteClass == "" {
+		plan.Bearer = bearerLabel(info.Lease)
+		plan.PathLabel = "lease_primary"
+		plan.Reason = "lease_primary_bearer"
+		return plan, nil
 	}
-	if routeClass == "" {
-		return nil
-	}
-	switch routeClass {
+	switch plan.RouteClass {
 	case "sleepy_tiny_control":
-		_, err := planSleepyCompactCommand(envelope, info)
-		return err
+		wire, err := planSleepyCompactCommand(envelope, info)
+		if err != nil {
+			return nil, err
+		}
+		plan.Bearer = "lora_direct"
+		plan.PathLabel = "sleepy_tiny_control/direct"
+		plan.Reason = "sleepy_leaf_short_id_payload_fit"
+		plan.Detail["payload_bytes"] = len(wire)
+		plan.Detail["profile"] = "JP125_LONG_SF10"
+		if info.Lease != nil && info.Lease.FabricShortID != nil {
+			plan.Detail["target_short_id"] = *info.Lease.FabricShortID
+		}
+		return plan, nil
 	case "maintenance_sync":
 		if info.Lease == nil || info.Lease.EffectiveRole != "sleepy_leaf" {
-			return nil
+			plan.Bearer = bearerLabel(info.Lease)
+			plan.PathLabel = "maintenance/non_sleepy"
+			plan.Reason = "target_not_sleepy_leaf"
+			return plan, nil
 		}
 		if info.Manifest != nil && !manifestAllowsBearer(info.Manifest, "ble_maintenance") {
-			return contracts.NewValidationError("maintenance_sync requires maintenance bearer for target %s", envelope.Target.Value)
+			return nil, contracts.NewValidationError("maintenance_sync requires maintenance bearer for target %s", envelope.Target.Value)
 		}
-		return nil
+		plan.Bearer = "ble_maintenance"
+		plan.PathLabel = "sleepy_maintenance_window"
+		plan.Reason = "maintenance_bearer_required"
+		return plan, nil
 	default:
-		return nil
+		return nil, contracts.NewValidationError("unsupported route_class %s for target %s", plan.RouteClass, envelope.Target.Value)
 	}
 }
 
@@ -1739,10 +1790,55 @@ func payloadInt64(payload map[string]any, key string) *int64 {
 		result := value
 		return &result
 	case float64:
+		if value != float64(int64(value)) {
+			return nil
+		}
 		result := int64(value)
 		return &result
 	default:
 		return nil
+	}
+}
+
+func deliveryRouteClass(delivery *contracts.DeliverySpec) string {
+	if delivery == nil {
+		return ""
+	}
+	return delivery.RouteClass
+}
+
+func deliveryBool(delivery *contracts.DeliverySpec, key string) bool {
+	if delivery == nil {
+		return false
+	}
+	switch key {
+	case "allow_relay":
+		return delivery.AllowRelay != nil && *delivery.AllowRelay
+	case "allow_redundant":
+		return delivery.AllowRedundant != nil && *delivery.AllowRedundant
+	default:
+		return false
+	}
+}
+
+func deliveryHopLimit(delivery *contracts.DeliverySpec) *int {
+	if delivery == nil {
+		return nil
+	}
+	return delivery.HopLimit
+}
+
+func bearerLabel(lease *contracts.Lease) string {
+	if lease == nil || lease.PrimaryBearer == "" {
+		return "unplanned"
+	}
+	switch lease.PrimaryBearer {
+	case "lora":
+		return "lora_direct"
+	case "wifi":
+		return "wifi_ip"
+	default:
+		return lease.PrimaryBearer
 	}
 }
 

@@ -3,6 +3,7 @@ package hostagent
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Aero123421/edge-fabric/internal/protocol/onair"
@@ -24,6 +26,10 @@ const (
 	FrameCompactBinary byte = 3
 	FrameSummaryBinary byte = 4
 )
+
+const onairDuplicateWindow = 5 * time.Second
+
+var compactIDCounter uint64
 
 type IngressObservation struct {
 	IngressID  string   `json:"ingress_id"`
@@ -58,6 +64,7 @@ type Agent struct {
 	spoolPath     string
 	rejectsPath   string
 	heartbeatPath string
+	onairSeen     map[string]time.Time
 	mu            sync.Mutex
 }
 
@@ -67,6 +74,7 @@ func New(router Ingester, spoolPath string) *Agent {
 		spoolPath:     spoolPath,
 		rejectsPath:   stringsTrimSuffix(spoolPath, filepath.Ext(spoolPath)) + ".rejected.jsonl",
 		heartbeatPath: stringsTrimSuffix(spoolPath, filepath.Ext(spoolPath)) + ".heartbeat.json",
+		onairSeen:     map[string]time.Time{},
 	}
 }
 
@@ -91,6 +99,7 @@ func (a *Agent) RelayUSBFrame(ctx context.Context, ingressID, sessionID string, 
 		return a.relayEnvelope(ctx, ingressID, sessionID, "usb_cdc", &observation, envelope)
 	}
 	if frameType == FrameCompactBinary || frameType == FrameSummaryBinary {
+		dedupeKey := onairDuplicateKey(frameType, payload)
 		envelope, status, err := decodeCompactSummaryEnvelope(ctx, runtimeResolver(a.router), frameType, payload)
 		if err != nil {
 			return nil, err
@@ -98,7 +107,14 @@ func (a *Agent) RelayUSBFrame(ctx context.Context, ingressID, sessionID string, 
 		if envelope == nil {
 			return &RelayResult{Status: status, Observation: observation}, nil
 		}
-		return a.relayEnvelope(ctx, ingressID, sessionID, "usb_cdc", &observation, envelope)
+		if a.seenRecentOnAirFrame(dedupeKey, time.Now().UTC()) {
+			return &RelayResult{Status: "duplicate_onair", Observation: observation}, nil
+		}
+		result, err := a.relayEnvelope(ctx, ingressID, sessionID, "usb_cdc", &observation, envelope)
+		if err == nil && result != nil && (result.Status == "persisted" || result.Status == "spooled") {
+			a.rememberOnAirFrame(dedupeKey, time.Now().UTC())
+		}
+		return result, err
 	}
 	if frameType != FrameEnvelopeJSON {
 		return nil, errors.New("unsupported USB frame type")
@@ -150,15 +166,17 @@ func (a *Agent) relayEnvelope(ctx context.Context, ingressID, sessionID, transpo
 	}
 	var validationError *contracts.ValidationError
 	if errors.As(err, &validationError) {
-		_ = a.appendJSONL(a.rejectsPath, map[string]any{
+		if appendErr := a.appendJSONL(a.rejectsPath, map[string]any{
 			"record_type": "reject",
 			"observation": observation,
 			"envelope":    cloned,
 			"error":       err.Error(),
-		})
+		}); appendErr != nil {
+			return &RelayResult{Status: "reject_spool_failed", Observation: *observation}, appendErr
+		}
 		return &RelayResult{Status: "rejected", Observation: *observation}, nil
 	}
-	_ = a.appendJSONL(a.spoolPath, map[string]any{
+	if appendErr := a.appendJSONL(a.spoolPath, map[string]any{
 		"record_type": "envelope",
 		"observation": observation,
 		"ingress_id":  ingressID,
@@ -166,7 +184,9 @@ func (a *Agent) relayEnvelope(ctx context.Context, ingressID, sessionID, transpo
 		"transport":   transport,
 		"envelope":    cloned,
 		"error":       err.Error(),
-	})
+	}); appendErr != nil {
+		return &RelayResult{Status: "spool_failed", Observation: *observation}, fmt.Errorf("router ingest failed: %w; spool failed: %v", err, appendErr)
+	}
 	return &RelayResult{Status: "spooled", Spooled: true, Observation: *observation}, nil
 }
 
@@ -192,11 +212,13 @@ func (a *Agent) FlushSpool(ctx context.Context) (int, error) {
 		}
 		var record map[string]any
 		if err := json.Unmarshal(line, &record); err != nil {
-			_ = appendJSONLUnlocked(a.rejectsPath, map[string]any{
+			if appendErr := appendJSONLUnlocked(a.rejectsPath, map[string]any{
 				"record_type": "reject",
 				"raw_line":    string(line),
 				"error":       err.Error(),
-			})
+			}); appendErr != nil {
+				return flushed, appendErr
+			}
 			continue
 		}
 		if record["record_type"] != "envelope" {
@@ -205,11 +227,13 @@ func (a *Agent) FlushSpool(ctx context.Context) (int, error) {
 		rawEnvelope, _ := json.Marshal(record["envelope"])
 		var envelope contracts.Envelope
 		if err := json.Unmarshal(rawEnvelope, &envelope); err != nil {
-			_ = appendJSONLUnlocked(a.rejectsPath, map[string]any{
+			if appendErr := appendJSONLUnlocked(a.rejectsPath, map[string]any{
 				"record_type": "reject",
 				"record":      record,
 				"error":       err.Error(),
-			})
+			}); appendErr != nil {
+				return flushed, appendErr
+			}
 			continue
 		}
 		ingressID, _ := record["ingress_id"].(string)
@@ -221,7 +245,9 @@ func (a *Agent) FlushSpool(ctx context.Context) (int, error) {
 		var validationError *contracts.ValidationError
 		if errors.As(err, &validationError) {
 			record["error"] = err.Error()
-			_ = appendJSONLUnlocked(a.rejectsPath, record)
+			if appendErr := appendJSONLUnlocked(a.rejectsPath, record); appendErr != nil {
+				return flushed, appendErr
+			}
 			continue
 		}
 		record["error"] = err.Error()
@@ -375,6 +401,30 @@ func appendJSONLUnlocked(path string, record map[string]any) error {
 	return file.Sync()
 }
 
+func onairDuplicateKey(frameType byte, payload []byte) string {
+	sum := sha256.Sum256(append([]byte{frameType}, payload...))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func (a *Agent) seenRecentOnAirFrame(key string, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cutoff := now.Add(-onairDuplicateWindow)
+	for existingKey, seenAt := range a.onairSeen {
+		if seenAt.Before(cutoff) {
+			delete(a.onairSeen, existingKey)
+		}
+	}
+	seenAt, ok := a.onairSeen[key]
+	return ok && !seenAt.Before(cutoff)
+}
+
+func (a *Agent) rememberOnAirFrame(key string, now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onairSeen[key] = now
+}
+
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -406,10 +456,15 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 }
 
 func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver, frameType byte, payload []byte) (*contracts.Envelope, string, error) {
-	_ = frameType
 	packet, err := onair.Decode(payload)
 	if err != nil {
 		return nil, "", err
+	}
+	if frameType == FrameCompactBinary && packet.Summary() {
+		return nil, "", errors.New("compact USB frame carried summary on-air packet")
+	}
+	if frameType == FrameSummaryBinary && !packet.Summary() {
+		return nil, "", errors.New("summary USB frame carried compact on-air packet")
 	}
 	shortID := packet.SourceShortID
 	hardwareID := fmt.Sprintf("short:%d", shortID)
@@ -428,14 +483,7 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 		if err != nil {
 			return nil, "", err
 		}
-		shape := "state_compact_v1"
-		wireShape := "compact_v1"
-		codecFamily := "compact_binary_v1"
-		if packet.Summary() {
-			shape = "state_summary_v1"
-			wireShape = "summary_v1"
-			codecFamily = "summary_binary_v1"
-		}
+		shape, wireShape, codecFamily := onairShape(packet, "state")
 		return &contracts.Envelope{
 			SchemaVersion: "1.0.0",
 			MessageID:     fmt.Sprintf("msg-compact-%d", time.Now().UTC().UnixNano()),
@@ -456,19 +504,57 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 				"onair_sequence":  packet.Sequence,
 			},
 		}, "", nil
+	case onair.TypeEvent:
+		body, err := onair.DecodeEvent(packet)
+		if err != nil {
+			return nil, "", err
+		}
+		shape, wireShape, codecFamily := onairShape(packet, "event")
+		priority := "normal"
+		if body.Severity == onair.EventSeverityCritical {
+			priority = "critical"
+		}
+		return &contracts.Envelope{
+			SchemaVersion: "1.0.0",
+			MessageID:     fmt.Sprintf("msg-compact-%d", time.Now().UTC().UnixNano()),
+			Kind:          "event",
+			Priority:      priority,
+			EventID: fmt.Sprintf(
+				"evt-onair-%d-%d-%d-%d-%d-%d-%d-%d",
+				time.Now().UTC().UnixNano(),
+				atomic.AddUint64(&compactIDCounter, 1),
+				shortID,
+				packet.Sequence,
+				body.EventCode,
+				body.Severity,
+				body.ValueBucket,
+				body.Flags,
+			),
+			OccurredAt: time.Now().UTC().Format(time.RFC3339Nano),
+			Source:     contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
+			Target:     contracts.TargetRef{Kind: "service", Value: "alerts"},
+			Payload: map[string]any{
+				"event_code":      int(body.EventCode),
+				"event_name":      eventNameFromToken(body.EventCode),
+				"severity":        eventSeverityFromToken(body.Severity),
+				"value_bucket":    int(body.ValueBucket),
+				"flags":           int(body.Flags),
+				"event_wake":      body.Flags&onair.EventFlagEventWake != 0,
+				"latched":         body.Flags&onair.EventFlagLatched != 0,
+				"shape":           shape,
+				"wire_shape":      wireShape,
+				"codec_family":    codecFamily,
+				"source_short_id": shortID,
+				"target_short_id": packet.TargetShortID,
+				"onair_sequence":  packet.Sequence,
+			},
+		}, "", nil
 	case onair.TypeCommandResult:
 		body, err := onair.DecodeCommandResult(packet)
 		if err != nil {
 			return nil, "", err
 		}
-		shape := "command_result_compact_v1"
-		wireShape := "compact_v1"
-		codecFamily := "compact_binary_v1"
-		if packet.Summary() {
-			shape = "command_result_summary_v1"
-			wireShape = "summary_v1"
-			codecFamily = "summary_binary_v1"
-		}
+		shape, wireShape, codecFamily := onairShape(packet, "command_result")
 		commandID := fmt.Sprintf("token:%d", body.CommandToken)
 		if resolver != nil {
 			resolved, err := resolver.ResolveCommandIDByTokenForTarget(ctx, hardwareID, body.CommandToken)
@@ -510,11 +596,97 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 			},
 		}, "", nil
 	case onair.TypePendingDigest:
-		return nil, "digest_recorded", nil
+		body, err := onair.DecodePendingDigest(packet)
+		if err != nil {
+			return nil, "", err
+		}
+		shape, wireShape, codecFamily := onairShape(packet, "pending_digest")
+		return controlHeartbeatEnvelope(hardwareID, shortID, packet, "pending_digest", map[string]any{
+			"pending_count": int(body.PendingCount),
+			"flags":         int(body.Flags),
+			"urgent":        body.Flags&onair.PendingFlagUrgent != 0,
+			"expires_soon":  body.Flags&onair.PendingFlagExpiresSoon != 0,
+			"shape":         shape,
+			"wire_shape":    wireShape,
+			"codec_family":  codecFamily,
+		}), "", nil
 	case onair.TypeTinyPoll:
-		return nil, "poll_recorded", nil
+		body, err := onair.DecodeTinyPoll(packet)
+		if err != nil {
+			return nil, "", err
+		}
+		shape, wireShape, codecFamily := onairShape(packet, "tiny_poll")
+		return controlHeartbeatEnvelope(hardwareID, shortID, packet, "tiny_poll", map[string]any{
+			"service_level": int(body.ServiceLevel),
+			"service_name":  serviceLevelFromToken(body.ServiceLevel),
+			"shape":         shape,
+			"wire_shape":    wireShape,
+			"codec_family":  codecFamily,
+		}), "", nil
+	case onair.TypeHeartbeat:
+		body, err := onair.DecodeHeartbeat(packet)
+		if err != nil {
+			return nil, "", err
+		}
+		shape, wireShape, codecFamily := onairShape(packet, "heartbeat")
+		return &contracts.Envelope{
+			SchemaVersion: "1.0.0",
+			MessageID:     fmt.Sprintf("msg-heartbeat-%d", time.Now().UTC().UnixNano()),
+			Kind:          "heartbeat",
+			Priority:      "normal",
+			OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
+			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
+			Target:        contracts.TargetRef{Kind: "host", Value: "site-router"},
+			Payload: map[string]any{
+				"gateway_id":        hardwareID,
+				"live":              true,
+				"status":            "onair_heartbeat",
+				"health":            heartbeatHealthFromToken(body.Health),
+				"health_code":       int(body.Health),
+				"battery_bucket":    int(body.BatteryBucket),
+				"link_quality":      int(body.LinkQuality),
+				"uptime_bucket":     int(body.UptimeBucket),
+				"flags":             int(body.Flags),
+				"event_wake":        body.Flags&onair.HeartbeatFlagEventWake != 0,
+				"maintenance_awake": body.Flags&onair.HeartbeatFlagMaintenanceAwake != 0,
+				"low_power":         body.Flags&onair.HeartbeatFlagLowPower != 0,
+				"shape":             shape,
+				"wire_shape":        wireShape,
+				"codec_family":      codecFamily,
+				"source_short_id":   shortID,
+				"target_short_id":   packet.TargetShortID,
+				"onair_sequence":    packet.Sequence,
+			},
+		}, "", nil
 	default:
 		return nil, "", errors.New("unsupported on-air logical type")
+	}
+}
+
+func onairShape(packet *onair.Packet, logicalName string) (string, string, string) {
+	if packet.Summary() {
+		return logicalName + "_summary_v1", "summary_v1", "summary_binary_v1"
+	}
+	return logicalName + "_compact_v1", "compact_v1", "compact_binary_v1"
+}
+
+func controlHeartbeatEnvelope(hardwareID string, shortID uint16, packet *onair.Packet, status string, payload map[string]any) *contracts.Envelope {
+	payload = cloneMap(payload)
+	payload["gateway_id"] = hardwareID
+	payload["live"] = true
+	payload["status"] = status
+	payload["source_short_id"] = shortID
+	payload["target_short_id"] = packet.TargetShortID
+	payload["onair_sequence"] = packet.Sequence
+	return &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     fmt.Sprintf("msg-heartbeat-%d", time.Now().UTC().UnixNano()),
+		Kind:          "heartbeat",
+		Priority:      "normal",
+		OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
+		Target:        contracts.TargetRef{Kind: "host", Value: "site-router"},
+		Payload:       payload,
 	}
 }
 
@@ -576,6 +748,58 @@ func stateValueFromToken(token byte) string {
 		return "awake"
 	case onair.StateValueSleep:
 		return "sleep"
+	default:
+		return "unknown"
+	}
+}
+
+func eventNameFromToken(token byte) string {
+	switch token {
+	case onair.EventCodeBatteryLow:
+		return "battery_low"
+	case onair.EventCodeMotionDetected:
+		return "motion_detected"
+	case onair.EventCodeLeakDetected:
+		return "leak_detected"
+	case onair.EventCodeTamper:
+		return "tamper"
+	case onair.EventCodeThresholdCrossed:
+		return "threshold_crossed"
+	default:
+		return "event.unknown"
+	}
+}
+
+func eventSeverityFromToken(token byte) string {
+	switch token {
+	case onair.EventSeverityInfo:
+		return "info"
+	case onair.EventSeverityWarning:
+		return "warning"
+	case onair.EventSeverityCritical:
+		return "critical"
+	default:
+		return "unknown"
+	}
+}
+
+func serviceLevelFromToken(token byte) string {
+	switch token {
+	case onair.ServiceLevelEventualNextPoll:
+		return "eventual_next_poll"
+	default:
+		return "unknown"
+	}
+}
+
+func heartbeatHealthFromToken(token byte) string {
+	switch token {
+	case onair.HeartbeatHealthOK:
+		return "ok"
+	case onair.HeartbeatHealthDegraded:
+		return "degraded"
+	case onair.HeartbeatHealthCritical:
+		return "critical"
 	default:
 		return "unknown"
 	}

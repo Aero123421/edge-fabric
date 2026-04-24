@@ -93,6 +93,45 @@ esp_err_t ef_onair_decode_state(const ef_onair_packet_t *packet, ef_onair_state_
     return ESP_OK;
 }
 
+esp_err_t ef_onair_encode_event(
+    uint16_t source_short_id,
+    bool summary,
+    uint8_t sequence,
+    const ef_onair_event_body_t *body,
+    uint8_t *out_buf,
+    size_t out_buf_cap,
+    size_t *out_len) {
+    uint8_t payload[4];
+    ef_onair_packet_t packet;
+    if (body == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    payload[0] = body->event_code;
+    payload[1] = body->severity;
+    payload[2] = body->value_bucket;
+    payload[3] = body->flags;
+    packet.version = EF_ONAIR_VERSION;
+    packet.logical_type = EF_ONAIR_TYPE_EVENT;
+    packet.flags = summary ? EF_ONAIR_FLAG_SUMMARY : 0u;
+    packet.sequence = sequence;
+    packet.source_short_id = source_short_id;
+    packet.target_short_id = 0u;
+    packet.body = payload;
+    packet.body_len = sizeof(payload);
+    return ef_onair_encode_packet(&packet, out_buf, out_buf_cap, out_len);
+}
+
+esp_err_t ef_onair_decode_event(const ef_onair_packet_t *packet, ef_onair_event_body_t *out_body) {
+    if (packet == NULL || out_body == NULL || packet->logical_type != EF_ONAIR_TYPE_EVENT || packet->body_len != 4u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out_body->event_code = packet->body[0];
+    out_body->severity = packet->body[1];
+    out_body->value_bucket = packet->body[2];
+    out_body->flags = packet->body[3];
+    return ESP_OK;
+}
+
 esp_err_t ef_onair_encode_command_result(
     uint16_t source_short_id,
     bool summary,
@@ -243,5 +282,47 @@ esp_err_t ef_onair_decode_compact_command(
     out_body->command_kind = packet->body[2];
     out_body->argument = packet->body[3];
     out_body->expires_in_sec = packet->body[4];
+    return ESP_OK;
+}
+
+esp_err_t ef_onair_encode_heartbeat(
+    uint16_t source_short_id,
+    bool summary,
+    uint8_t sequence,
+    const ef_onair_heartbeat_body_t *body,
+    uint8_t *out_buf,
+    size_t out_buf_cap,
+    size_t *out_len) {
+    uint8_t payload[5];
+    ef_onair_packet_t packet;
+    if (body == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    payload[0] = body->health;
+    payload[1] = body->battery_bucket;
+    payload[2] = body->link_quality;
+    payload[3] = body->uptime_bucket;
+    payload[4] = body->flags;
+    packet.version = EF_ONAIR_VERSION;
+    packet.logical_type = EF_ONAIR_TYPE_HEARTBEAT;
+    packet.flags = summary ? EF_ONAIR_FLAG_SUMMARY : 0u;
+    packet.sequence = sequence;
+    packet.source_short_id = source_short_id;
+    packet.target_short_id = 0u;
+    packet.body = payload;
+    packet.body_len = sizeof(payload);
+    return ef_onair_encode_packet(&packet, out_buf, out_buf_cap, out_len);
+}
+
+esp_err_t ef_onair_decode_heartbeat(const ef_onair_packet_t *packet, ef_onair_heartbeat_body_t *out_body) {
+    if (packet == NULL || out_body == NULL || packet->logical_type != EF_ONAIR_TYPE_HEARTBEAT ||
+        packet->body_len != 5u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out_body->health = packet->body[0];
+    out_body->battery_bucket = packet->body[1];
+    out_body->link_quality = packet->body[2];
+    out_body->uptime_bucket = packet->body[3];
+    out_body->flags = packet->body[4];
     return ESP_OK;
 }

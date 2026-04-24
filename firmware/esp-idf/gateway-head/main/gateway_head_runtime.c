@@ -28,6 +28,8 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
 static esp_err_t gateway_handle_radio_frame(const radio_hal_frame_t *frame);
 static bool gateway_payload_is_json_object(const uint8_t *payload, size_t payload_len);
 static bool gateway_payload_is_legacy_compact(const uint8_t *payload, size_t payload_len);
+static bool gateway_dev_wire_compat_enabled(void);
+static esp_err_t gateway_validate_onair_packet(const ef_onair_packet_t *packet);
 static uint8_t gateway_classify_radio_frame_type(const radio_hal_frame_t *frame);
 static esp_err_t gateway_head_runtime_ensure_identity(void);
 
@@ -151,6 +153,10 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
     payload = &frame[6];
     switch (frame[3]) {
         case EF_USB_FRAME_ENVELOPE_JSON:
+            if (!gateway_dev_wire_compat_enabled()) {
+                ESP_LOGW(TAG, "raw JSON over LoRa is disabled outside development backends");
+                return ESP_ERR_NOT_SUPPORTED;
+            }
             if (!gateway_payload_is_json_object(payload, payload_len)) {
                 return ESP_ERR_INVALID_RESPONSE;
             }
@@ -158,9 +164,12 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
             return gateway_send_heartbeat("hop_buffered", (int)payload_len);
         case EF_USB_FRAME_COMPACT_BINARY:
         case EF_USB_FRAME_SUMMARY_BINARY:
-            if (ef_onair_decode_packet(payload, payload_len, &packet) != ESP_OK &&
-                !gateway_payload_is_legacy_compact(payload, payload_len)) {
-                return ESP_ERR_INVALID_RESPONSE;
+            if (ef_onair_decode_packet(payload, payload_len, &packet) == ESP_OK) {
+                ESP_RETURN_ON_ERROR(gateway_validate_onair_packet(&packet), TAG, "invalid on-air body");
+            } else {
+                if (!(gateway_dev_wire_compat_enabled() && gateway_payload_is_legacy_compact(payload, payload_len))) {
+                    return ESP_ERR_INVALID_RESPONSE;
+                }
             }
             ESP_RETURN_ON_ERROR(radio_hal_send_frame(payload, payload_len), TAG, "LoRa TX failed");
             return gateway_send_heartbeat("hop_buffered", (int)payload_len);
@@ -250,18 +259,47 @@ static bool gateway_payload_is_legacy_compact(const uint8_t *payload, size_t pay
     return true;
 }
 
+static bool gateway_dev_wire_compat_enabled(void) {
+    return radio_hal_backend_is_development_only();
+}
+
+static esp_err_t gateway_validate_onair_packet(const ef_onair_packet_t *packet) {
+    if (packet == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    switch (packet->logical_type) {
+        case EF_ONAIR_TYPE_STATE:
+            return packet->body_len == 3u ? ESP_OK : ESP_ERR_INVALID_SIZE;
+        case EF_ONAIR_TYPE_EVENT:
+            return packet->body_len == 4u ? ESP_OK : ESP_ERR_INVALID_SIZE;
+        case EF_ONAIR_TYPE_COMMAND_RESULT:
+            return packet->body_len == 4u ? ESP_OK : ESP_ERR_INVALID_SIZE;
+        case EF_ONAIR_TYPE_PENDING_DIGEST:
+            return packet->body_len == 2u ? ESP_OK : ESP_ERR_INVALID_SIZE;
+        case EF_ONAIR_TYPE_TINY_POLL:
+            return packet->body_len == 1u ? ESP_OK : ESP_ERR_INVALID_SIZE;
+        case EF_ONAIR_TYPE_COMPACT_COMMAND:
+            return packet->body_len == 5u ? ESP_OK : ESP_ERR_INVALID_SIZE;
+        case EF_ONAIR_TYPE_HEARTBEAT:
+            return packet->body_len == 5u ? ESP_OK : ESP_ERR_INVALID_SIZE;
+        default:
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+}
+
 static uint8_t gateway_classify_radio_frame_type(const radio_hal_frame_t *frame) {
     ef_onair_packet_t packet;
     if (frame == NULL || frame->payload_len == 0u) {
         return 0u;
     }
-    if (ef_onair_decode_packet(frame->payload, frame->payload_len, &packet) == ESP_OK) {
+    if (ef_onair_decode_packet(frame->payload, frame->payload_len, &packet) == ESP_OK &&
+        gateway_validate_onair_packet(&packet) == ESP_OK) {
         return (packet.flags & EF_ONAIR_FLAG_SUMMARY) != 0u ? EF_USB_FRAME_SUMMARY_BINARY : EF_USB_FRAME_COMPACT_BINARY;
     }
-    if (gateway_payload_is_json_object(frame->payload, frame->payload_len)) {
+    if (gateway_dev_wire_compat_enabled() && gateway_payload_is_json_object(frame->payload, frame->payload_len)) {
         return EF_USB_FRAME_ENVELOPE_JSON;
     }
-    if (gateway_payload_is_legacy_compact(frame->payload, frame->payload_len)) {
+    if (gateway_dev_wire_compat_enabled() && gateway_payload_is_legacy_compact(frame->payload, frame->payload_len)) {
         return EF_USB_FRAME_COMPACT_BINARY;
     }
     return 0u;
