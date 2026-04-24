@@ -135,6 +135,8 @@ type Router struct {
 	maxRetryCount int
 }
 
+const radioPacketObservationWindow = 10 * time.Minute
+
 type stateCandidate struct {
 	Envelope    contracts.Envelope
 	PersistedAt string
@@ -578,7 +580,8 @@ func (r *Router) recordDuplicateRadioObservation(ctx context.Context, tx *sql.Tx
 		return "", nil
 	}
 	var duplicate string
-	err := tx.QueryRowContext(ctx, `SELECT first_message_id FROM radio_packet_observation WHERE packet_key = ?`, packetKey).Scan(&duplicate)
+	var lastSeenAt string
+	err := tx.QueryRowContext(ctx, `SELECT first_message_id, last_seen_at FROM radio_packet_observation WHERE packet_key = ?`, packetKey).Scan(&duplicate, &lastSeenAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -586,6 +589,11 @@ func (r *Router) recordDuplicateRadioObservation(ctx context.Context, tx *sql.Tx
 		return "", err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	lastSeen, err := time.Parse(time.RFC3339Nano, lastSeenAt)
+	if err != nil || time.Since(lastSeen.UTC()) > radioPacketObservationWindow {
+		_, err := tx.ExecContext(ctx, `DELETE FROM radio_packet_observation WHERE packet_key = ?`, packetKey)
+		return "", err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE radio_packet_observation
 		SET last_message_id = ?, last_ingress_id = ?, observed_count = observed_count + 1, last_seen_at = ?
@@ -1121,6 +1129,9 @@ func (r *Router) IssueCommand(ctx context.Context, envelope *contracts.Envelope,
 	if envelope.Kind != "command" {
 		return nil, 0, contracts.NewValidationError("IssueCommand requires kind=command")
 	}
+	if _, err := r.PlanOutboundRoute(ctx, envelope); err != nil {
+		return nil, 0, err
+	}
 	ack, err := r.Ingest(ctx, envelope, ingressID)
 	if err != nil {
 		return nil, 0, err
@@ -1214,9 +1225,71 @@ func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Enve
 		plan.PathLabel = "sleepy_maintenance_window"
 		plan.Reason = "maintenance_bearer_required"
 		return plan, nil
+	case "local_control":
+		return r.planPolicyRoute(envelope, plan, info, "local_control", []string{"wifi", "wifi_ip", "usb_cdc"}, false), nil
+	case "bulk_wifi_only":
+		return r.planPolicyRoute(envelope, plan, info, "bulk_wifi_only", []string{"wifi", "wifi_ip", "wifi_mesh"}, false), nil
+	case "critical_alert":
+		return r.planPolicyRoute(envelope, plan, info, "critical_alert", []string{"wifi", "wifi_ip", "lora_direct"}, true), nil
+	case "sparse_summary":
+		return r.planPolicyRoute(envelope, plan, info, "sparse_summary", []string{"lora_direct", "wifi", "wifi_ip"}, true), nil
+	case "sleepy_heartbeat":
+		return r.planPolicyRoute(envelope, plan, info, "sleepy_heartbeat", []string{"lora_direct", "wifi", "wifi_ip"}, true), nil
+	case "normal_state":
+		return r.planPolicyRoute(envelope, plan, info, "normal_state", []string{"wifi", "wifi_ip", "lora_direct"}, true), nil
+	case "control_event":
+		return r.planPolicyRoute(envelope, plan, info, "control_event", []string{"wifi", "wifi_ip"}, false), nil
 	default:
 		return nil, contracts.NewValidationError("unsupported route_class %s for target %s", plan.RouteClass, envelope.Target.Value)
 	}
+}
+
+func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, info *NodeRuntimeInfo, routeClass string, allowedBearers []string, allowLoRaIfRepresentable bool) *RoutePlan {
+	bearer := bearerLabel(nil)
+	if info != nil {
+		bearer = bearerLabel(info.Lease)
+	}
+	plan.Bearer = bearer
+	plan.PathLabel = routeClass + "/policy"
+	plan.Reason = routeClass + "_policy"
+	if bearer == "unplanned" {
+		plan.PayloadFit = false
+		plan.Reason = "lease_missing"
+		plan.Detail["allowed_bearers"] = allowedBearers
+		return plan
+	}
+	if !bearerAllowedByPolicy(bearer, allowedBearers) {
+		plan.PayloadFit = false
+		plan.Reason = "bearer_forbidden_by_route_class"
+		plan.Detail["bearer"] = bearer
+		plan.Detail["allowed_bearers"] = allowedBearers
+		return plan
+	}
+	if bearerIsLoRa(bearer) && !allowLoRaIfRepresentable {
+		plan.PayloadFit = false
+		plan.Reason = "lora_forbidden_by_route_class"
+		plan.Detail["bearer"] = bearer
+		return plan
+	}
+	if bearerIsLoRa(bearer) && allowLoRaIfRepresentable {
+		bytes := payloadDeclaredBytes(envelope.Payload)
+		if bytes <= 0 {
+			plan.PayloadFit = false
+			plan.Reason = "lora_requires_declared_compact_payload"
+			return plan
+		}
+		cap, err := jp.BodyCapForProfile(jpProfilePath(), "JP125_LONG_SF10", false)
+		if err == nil && bytes > cap {
+			plan.PayloadFit = false
+			plan.Reason = "lora_payload_too_large"
+			plan.Detail["payload_bytes"] = bytes
+			plan.Detail["cap_bytes"] = cap
+			return plan
+		}
+		plan.Detail["payload_bytes"] = bytes
+		plan.Detail["profile"] = "JP125_LONG_SF10"
+	}
+	return plan
 }
 
 func (r *Router) EnqueueOutbound(ctx context.Context, envelope *contracts.Envelope, queueKey string) (int64, error) {
@@ -1328,6 +1401,7 @@ func (r *Router) LeaseOutbound(ctx context.Context, workerID string, limit int, 
 		SELECT id, message_id, envelope_json
 		FROM outbox_queue
 		WHERE status = 'queued'
+		  AND route_status = 'ready_to_send'
 		ORDER BY CASE priority
 			WHEN 'critical' THEN 0
 			WHEN 'control' THEN 1
@@ -1353,7 +1427,7 @@ func (r *Router) LeaseOutbound(ctx context.Context, workerID string, limit int, 
 		result, err := tx.ExecContext(ctx, `
 			UPDATE outbox_queue
 			SET status = 'leased', lease_owner = ?, lease_until = ?, updated_at = ?
-			WHERE id = ? AND status = 'queued'
+			WHERE id = ? AND status = 'queued' AND route_status = 'ready_to_send'
 		`, workerID, leaseUntil, now.Format(time.RFC3339Nano), id)
 		if err != nil {
 			return nil, err
@@ -1878,6 +1952,9 @@ func validateLeaseAgainstManifest(lease *contracts.Lease, manifest *contracts.Ma
 	if lease == nil {
 		return nil
 	}
+	if err := validateOptionalFabricShortID(lease.FabricShortID, "lease.fabric_short_id"); err != nil {
+		return err
+	}
 	if manifest == nil {
 		return nil
 	}
@@ -1903,8 +1980,11 @@ func planSleepyCompactCommand(envelope *contracts.Envelope, info *NodeRuntimeInf
 	if info == nil || info.Lease == nil {
 		return nil, contracts.NewValidationError("sleepy_tiny_control requires lease with fabric_short_id for target %s", envelope.Target.Value)
 	}
-	if info.Lease.FabricShortID == nil || *info.Lease.FabricShortID <= 0 {
+	if info.Lease.FabricShortID == nil {
 		return nil, contracts.NewValidationError("sleepy_tiny_control requires fabric_short_id for target %s", envelope.Target.Value)
+	}
+	if err := validateOptionalFabricShortID(info.Lease.FabricShortID, "lease.fabric_short_id"); err != nil {
+		return nil, err
 	}
 	if info.Lease.EffectiveRole != "sleepy_leaf" {
 		return nil, contracts.NewValidationError("sleepy_tiny_control targets must be sleepy_leaf, got %s", info.Lease.EffectiveRole)
@@ -2080,6 +2160,15 @@ func bearerIsLoRa(bearer string) bool {
 	return bearer == "lora" || strings.HasPrefix(bearer, "lora_")
 }
 
+func bearerAllowedByPolicy(bearer string, allowed []string) bool {
+	for _, candidate := range allowed {
+		if bearer == candidate || manifestBearerName(bearer) == candidate || bearer == manifestBearerName(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
 func routeStatusForPlan(plan *RoutePlan) string {
 	if plan == nil || plan.Bearer == "" || plan.Bearer == "unplanned" {
 		return "route_pending"
@@ -2088,6 +2177,15 @@ func routeStatusForPlan(plan *RoutePlan) string {
 		return "route_blocked"
 	}
 	return "ready_to_send"
+}
+
+func payloadDeclaredBytes(payload map[string]any) int {
+	for _, key := range []string{"payload_bytes", "body_bytes", "summary_bytes", "compact_bytes"} {
+		if value := payloadInt64(payload, key); value != nil && *value > 0 && *value <= int64(^uint(0)>>1) {
+			return int(*value)
+		}
+	}
+	return 0
 }
 
 func payloadString(payload map[string]any, key string) string {
@@ -2268,6 +2366,16 @@ func manifestBearerName(bearer string) string {
 	default:
 		return bearer
 	}
+}
+
+func validateOptionalFabricShortID(value *int, field string) error {
+	if value == nil {
+		return nil
+	}
+	if *value < 1 || *value > 0xFFFF {
+		return contracts.NewValidationError("%s must be between 1 and 65535", field)
+	}
+	return nil
 }
 
 func isSleepyPowerClass(manifest *contracts.Manifest) bool {

@@ -105,6 +105,47 @@ func TestOnAirPacketKeyDedupesAcrossGatewayEventIDs(t *testing.T) {
 	}
 }
 
+func TestOnAirPacketKeyDedupeExpires(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	packetKey := "onair-v1:201:0:21:2:abcdef01"
+	first := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-onair-expire-a",
+		Kind:          "event",
+		Priority:      "critical",
+		EventID:       "evt-onair-expire-a",
+		Source:        contracts.SourceRef{HardwareID: "sleepy-onair-ttl"},
+		Target:        contracts.TargetRef{Kind: "service", Value: "alerts"},
+		MeshMeta:      &contracts.MeshMeta{OnAirKey: packetKey},
+		Payload:       map[string]any{"event_code": 2, "severity": 3},
+	}
+	if _, err := router.Ingest(ctx, first, "gateway-a"); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-2 * radioPacketObservationWindow).Format(time.RFC3339Nano)
+	if _, err := router.db.ExecContext(ctx, `UPDATE radio_packet_observation SET last_seen_at = ? WHERE packet_key = ?`, old, packetKey); err != nil {
+		t.Fatal(err)
+	}
+	second := *first
+	second.MessageID = "msg-onair-expire-b"
+	second.EventID = "evt-onair-expire-b"
+	ack, err := router.Ingest(ctx, &second, "gateway-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Duplicate {
+		t.Fatal("stale on-air packet key must not dedupe a new real event")
+	}
+	count, err := router.CountEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 events after dedupe window expiry, got %d", count)
+	}
+}
+
 func TestQueueRecovery(t *testing.T) {
 	router := openTestRouter(t)
 	ctx := context.Background()
@@ -432,6 +473,26 @@ func TestPendingDigestFlagsUrgencyAcrossMixedQueueStates(t *testing.T) {
 	router := openTestRouter(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
+	if err := router.UpsertManifest(ctx, "sleepy-03", &contracts.Manifest{
+		HardwareID:          "sleepy-03",
+		DeviceFamily:        "xiao-esp32s3",
+		PowerClass:          "mains",
+		WakeClass:           "always_on",
+		SupportedBearers:    []string{"wifi"},
+		AllowedNetworkRoles: []string{"powered_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "sleepy-03", &contracts.Lease{
+		RoleLeaseID:      "lease-mixed-03",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-mixed-03",
+		EffectiveRole:    "powered_leaf",
+		PrimaryBearer:    "wifi",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	control := &contracts.Envelope{
 		SchemaVersion: "1.0.0",
 		MessageID:     "msg-command-mixed-01",
@@ -639,6 +700,66 @@ func TestUnsupportedRouteClassIsRejected(t *testing.T) {
 	}
 }
 
+func TestIssueCommandRouteFailureDoesNotLeaveIssuedCommand(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	command := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-command-route-fail",
+		Kind:          "command",
+		Priority:      "control",
+		CommandID:     "cmd-route-fail",
+		Source:        contracts.SourceRef{HardwareID: "controller-route-fail"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "node-route-fail"},
+		Delivery:      &contracts.DeliverySpec{RouteClass: "unknown_mesh_magic"},
+		Payload:       map[string]any{"command_name": "relay.toggle"},
+	}
+	if _, _, err := router.IssueCommand(ctx, command, "local", ""); err == nil {
+		t.Fatal("expected route planning failure")
+	}
+	state, err := router.CommandState(ctx, "cmd-route-fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != "" {
+		t.Fatalf("route failure should not leave issued command, got state %s", state)
+	}
+}
+
+func TestRoutePendingQueueIsNotLeased(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	command := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-command-route-pending",
+		Kind:          "command",
+		Priority:      "control",
+		CommandID:     "cmd-route-pending",
+		Source:        contracts.SourceRef{HardwareID: "controller-route-pending"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "node-route-pending"},
+		Delivery:      &contracts.DeliverySpec{RouteClass: "local_control"},
+		Payload:       map[string]any{"command_name": "relay.set"},
+	}
+	queueID, err := router.EnqueueOutbound(ctx, command, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := router.OutboxRoutePlan(ctx, queueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record == nil || record.RouteStatus != "route_pending" {
+		t.Fatalf("expected route_pending record, got %+v", record)
+	}
+	leases, err := router.LeaseOutbound(ctx, "worker-route-pending", 1, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("route_pending queue must not be leased, got %+v", leases)
+	}
+}
+
 func TestLeasePrimaryBearerMustMatchManifest(t *testing.T) {
 	router := openTestRouter(t)
 	ctx := context.Background()
@@ -663,6 +784,123 @@ func TestLeasePrimaryBearerMustMatchManifest(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected unsupported primary_bearer to be rejected")
+	}
+}
+
+func TestFabricShortIDRangeIsValidated(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, "short-range-01", &contracts.Manifest{
+		HardwareID:          "short-range-01",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "primary_battery",
+		WakeClass:           "sleepy_event",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"sleepy_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := router.UpsertLease(ctx, "short-range-01", &contracts.Lease{
+		RoleLeaseID:      "lease-short-bad",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-short-bad",
+		FabricShortID:    intPtr(70000),
+		EffectiveRole:    "sleepy_leaf",
+		PrimaryBearer:    "lora",
+	})
+	if err == nil {
+		t.Fatal("expected out-of-range fabric_short_id to be rejected")
+	}
+}
+
+func TestPolicyRouteClassesHaveSafeMinimalGates(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, "wifi-local-01", &contracts.Manifest{
+		HardwareID:          "wifi-local-01",
+		DeviceFamily:        "xiao-esp32s3",
+		PowerClass:          "mains",
+		WakeClass:           "always_on",
+		SupportedBearers:    []string{"wifi"},
+		AllowedNetworkRoles: []string{"powered_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "wifi-local-01", &contracts.Lease{
+		RoleLeaseID:      "lease-wifi-local",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-wifi-local",
+		EffectiveRole:    "powered_leaf",
+		PrimaryBearer:    "wifi_ip",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	local := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-local-control",
+		Kind:          "command",
+		Priority:      "control",
+		CommandID:     "cmd-local-control",
+		Source:        contracts.SourceRef{HardwareID: "controller-local"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "wifi-local-01"},
+		Delivery:      &contracts.DeliverySpec{RouteClass: "local_control"},
+		Payload:       map[string]any{"command_name": "servo.set_angle"},
+	}
+	plan, err := router.PlanOutboundRoute(ctx, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Bearer != "wifi_ip" || plan.RouteClass != "local_control" || !plan.PayloadFit {
+		t.Fatalf("unexpected local_control plan: %+v", plan)
+	}
+	if err := router.UpsertManifest(ctx, "lora-summary-01", &contracts.Manifest{
+		HardwareID:          "lora-summary-01",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "primary_battery",
+		WakeClass:           "sleepy_event",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"sleepy_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "lora-summary-01", &contracts.Lease{
+		RoleLeaseID:      "lease-lora-summary",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-lora-summary",
+		FabricShortID:    intPtr(212),
+		EffectiveRole:    "sleepy_leaf",
+		PrimaryBearer:    "lora",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	summary := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-summary-ok",
+		Kind:          "event",
+		Priority:      "critical",
+		EventID:       "evt-summary-ok",
+		Source:        contracts.SourceRef{HardwareID: "controller-summary"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "lora-summary-01"},
+		Delivery:      &contracts.DeliverySpec{RouteClass: "sparse_summary"},
+		Payload:       map[string]any{"payload_bytes": 6},
+	}
+	plan, err = router.PlanOutboundRoute(ctx, summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Bearer != "lora_direct" || !plan.PayloadFit {
+		t.Fatalf("unexpected sparse_summary plan: %+v", plan)
+	}
+	summary.Payload = map[string]any{"payload_bytes": 99}
+	plan, err = router.PlanOutboundRoute(ctx, summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PayloadFit || plan.Reason != "lora_payload_too_large" {
+		t.Fatalf("expected lora payload too large gate, got %+v", plan)
 	}
 }
 

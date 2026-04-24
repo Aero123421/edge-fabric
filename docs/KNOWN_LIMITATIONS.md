@@ -19,7 +19,8 @@
 
 - Go runtime では short ID / lease / payload-fit gate を先行実装し、firmware 側も binary on-air と short ID に追随し始めたが、deep sleep と path-aware queue はまだ未完了です
 - gateway heartbeat と on-air heartbeat / digest / poll diagnostics は Host Agent から Site Router の durable heartbeat ledger に入ります
-- on-air packet key は短期 radio duplicate suppression 用です。Host Agent は receiver-side time bucket を足した durable `event_id` を使いますが、lease epoch / boot counter 由来の production-grade event identity は今後の hardening 対象です
+- on-air packet key は短期 radio duplicate suppression 用です。Site Router は durable table に観測を残しますが、dedupe 判定は短い window に限定します。lease epoch / boot counter 由来の production-grade event identity は今後の hardening 対象です
+- `route_pending` / `route_blocked` は worker lease 対象外です。再計画 worker / explain-route CLI は今後の hardening 対象です
 - sleepy command の 16-bit `command_token` は `sleepy_tiny_control` など compact token が必要な route だけで割り当て、target node scope で解決します。lease epoch / active window scoped token reuse は今後の hardening 対象です
 - `sleepy_tiny_control` の compact downlink は小さい command subset を優先し、rich payload / OTA / maintenance transfer はまだ summary / maintenance path 側です
 - `Wi-Fi mesh backbone`

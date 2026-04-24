@@ -13,7 +13,10 @@ SDK は app-facing semantic API を担当します。
 
 - `pkg/sdk.OpenLocalSite(dbPath, sourceID)` で internal router を触らず local site を開けます
 - `pkg/fabric.OpenLocal(dbPath, sourceID)` は typed state / event / sleepy command builder を提供します
-- 戻り値は `PersistAck`
+- `pkg/fabric.Event.EventID` はアプリ側 idempotency が必要な場合に指定できます
+- `pkg/fabric.SleepyCommand(...).SendResult(ctx)` は `QueueID` / `CommandID` / persist 状態を含む app-facing result を返します
+- `pkg/fabric.RegisterDeviceProfile` は role / primary bearer / fallback bearer の option を受け取れます
+- low-level 戻り値は `PersistAck`、app-facing sleepy command は `SendResult`
 - local demo は `scripts/demo_local_router.py` にあります
 
 sleepy node 向け command では少なくとも次を扱えるようにします。
@@ -41,6 +44,7 @@ _, _ = fabric.PublishState(ctx, fabric.State{
 })
 
 _, _ = fabric.EmitEvent(ctx, fabric.Event{
+    EventID:  "motion-01:boot-12:seq-87",
     Source:   "motion-01",
     Type:     fabric.EventMotionDetected,
     Severity: fabric.Critical,

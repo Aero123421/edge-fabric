@@ -361,6 +361,33 @@ class ContractTests(unittest.TestCase):
         motion = profiles["profiles"]["motion_sensor_battery_v1"]
         self.assertEqual(motion["allowed_roles"], ["sleepy_leaf"])
         self.assertTrue(motion["forbidden"]["relay"])
+        for profile in profiles["profiles"].values():
+            for route_class in profile["default_routes"].values():
+                self.assertIn(route_class, routes["route_classes"])
+
+    def test_fixture_route_classes_exist_in_policy_artifact(self) -> None:
+        routes = self._load_json("contracts/policy/route-classes.json")["route_classes"]
+        for fixture in (
+            "contracts/fixtures/command-servo-set-angle.json",
+            "contracts/fixtures/command-sleepy-threshold-set.json",
+            "contracts/fixtures/command-sleepy-maintenance-sync.json",
+        ):
+            envelope = self._load_json(fixture)
+            route_class = envelope.get("delivery", {}).get("route_class")
+            if route_class:
+                self.assertIn(route_class, routes, fixture)
+
+    def test_policy_artifacts_are_referenced_by_go_runtime(self) -> None:
+        routes = self._load_json("contracts/policy/route-classes.json")["route_classes"]
+        router_source = (ROOT / "internal" / "siterouter" / "router.go").read_text(
+            encoding="utf-8"
+        )
+        for route_class in routes:
+            self.assertIn(route_class, router_source)
+        fabric_source = (ROOT / "pkg" / "fabric" / "profiles.go").read_text(encoding="utf-8")
+        profiles = self._load_json("contracts/policy/device-profiles.json")["profiles"]
+        for profile_id in profiles:
+            self.assertIn(profile_id, fabric_source)
 
 
 if __name__ == "__main__":

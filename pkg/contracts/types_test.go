@@ -16,3 +16,20 @@ func TestValidateAllowsFileChunk(t *testing.T) {
 		t.Fatalf("file_chunk should validate, got %v", err)
 	}
 }
+
+func TestValidateRejectsOutOfRangeFabricShortID(t *testing.T) {
+	badID := 70000
+	envelope := &Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-short-bad",
+		Kind:          "event",
+		Priority:      "critical",
+		EventID:       "evt-short-bad",
+		Source:        SourceRef{HardwareID: "node-short-bad", FabricShortID: &badID},
+		Target:        TargetRef{Kind: "service", Value: "alerts"},
+		Payload:       map[string]any{"event_type": "motion_detected"},
+	}
+	if err := envelope.Validate(); err == nil {
+		t.Fatal("expected out-of-range fabric_short_id to be rejected")
+	}
+}

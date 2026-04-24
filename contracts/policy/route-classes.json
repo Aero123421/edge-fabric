@@ -26,6 +26,23 @@
       "allow_redundant": false,
       "service_level": "eventual_summary"
     },
+    "sleepy_heartbeat": {
+      "allowed_bearers": ["lora_direct", "wifi", "wifi_ip"],
+      "allow_redundant": false,
+      "max_lora_body_bytes": 10,
+      "service_level": "sleepy_liveness"
+    },
+    "normal_state": {
+      "allowed_bearers": ["wifi", "wifi_ip", "lora_direct"],
+      "allow_redundant": false,
+      "max_lora_body_bytes": 10,
+      "service_level": "normal_state"
+    },
+    "control_event": {
+      "allowed_bearers": ["wifi", "wifi_ip"],
+      "forbidden_bearers": ["lora", "lora_direct"],
+      "service_level": "control_event"
+    },
     "bulk_wifi_only": {
       "allowed_bearers": ["wifi", "wifi_ip", "wifi_mesh"],
       "forbidden_bearers": ["lora", "lora_direct", "lora_relay"],

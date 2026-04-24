@@ -208,7 +208,7 @@ func TestOnAirHeartbeatRelaysIntoRouter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record == nil || record.Status != "onair_heartbeat" || record.Payload["health"] != "degraded" {
+	if record == nil || record.Status != "onair_heartbeat" || record.SubjectKind != "node" || record.SubjectID != "short:201" || record.Payload["health"] != "degraded" {
 		t.Fatalf("heartbeat was not persisted into router: %+v", record)
 	}
 }
@@ -532,7 +532,7 @@ func TestDigestAndPollFramesBecomeControlHeartbeats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record == nil || record.Status != "tiny_poll" {
+	if record == nil || record.Status != "tiny_poll" || record.SubjectKind != "node" || record.SubjectID != "short:201" {
 		t.Fatalf("expected latest tiny_poll heartbeat, got %+v", record)
 	}
 }

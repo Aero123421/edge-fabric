@@ -27,8 +27,9 @@ Current Alpha Can:
 - gateway / node heartbeat を `subject_kind / subject_id` で一般化し、`lora_ingress` は live gateway observation として扱う
 - binary on-air v1 の `state / event / command_result / pending_digest / tiny_poll / compact_command / heartbeat` を encode/decode する
 - sleepy tiny command を short ID / command token / JP payload cap 前提で扱う
-- `pkg/fabric` から state / event / sleepy tiny command を typed entrypoint で発行する
+- `pkg/fabric` から state / event / sleepy tiny command を typed entrypoint で発行し、EventID / DeviceProfile 登録 option / SendResult を扱う
 - `contracts/policy/` で device profile / role policy / route class の安全な初期方針を固定する
+- on-air packet key は durable event identity ではなく短期 radio duplicate window として扱い、古い同一 key は新イベントとして通す
 - clean source export を生成し、Python / Go / firmware build smoke CI で主線を守る
 
 Current Alpha Cannot Yet:
@@ -50,6 +51,7 @@ Current Alpha Cannot Yet:
 - LoRa on-air は short ID 前提の binary header / compact command token を優先する
 - `manifest / lease / role / power-class` を queue 前に反映する
 - LoRa route は explicit route class と compact/summary payload fit を通ったものだけ queue する
+- worker lease は `route_status=ready_to_send` の outbox だけを対象にし、`route_pending` は再計画待ちに残す
 - `contract -> integration -> HIL -> soak` を各フェーズで gate にする
 
 ## 実装トラック

@@ -163,6 +163,9 @@ func (e *Envelope) Validate() error {
 	if e.Source.HardwareID == "" {
 		return NewValidationError("source.hardware_id is required")
 	}
+	if err := validateFabricShortID(e.Source.FabricShortID, "source.fabric_short_id"); err != nil {
+		return err
+	}
 	if e.Target.Kind == "" || e.Target.Value == "" {
 		return NewValidationError("target.kind and target.value are required")
 	}
@@ -206,6 +209,16 @@ func (e *Envelope) Validate() error {
 	}
 	if e.MeshMeta != nil && e.MeshMeta.HopCount != nil && *e.MeshMeta.HopCount < 0 {
 		return NewValidationError("mesh_meta.hop_count must be >= 0")
+	}
+	return nil
+}
+
+func validateFabricShortID(value *int, field string) error {
+	if value == nil {
+		return nil
+	}
+	if *value < 1 || *value > 65535 {
+		return NewValidationError("%s must be between 1 and 65535", field)
 	}
 	return nil
 }

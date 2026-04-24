@@ -18,10 +18,11 @@
 | --- | --- | --- | --- |
 | Site Router durable core | active | Go test 主線 / Python comparison | SQLite ledger, dedupe, queue, command lifecycle, manifest/lease storage, role gate |
 | Host Agent direct ingest | active | Go test / direct demos | JSON fixture, compact/summary relay, short-ID aware binary on-air state/event/heartbeat decode, gateway heartbeat durable ingest, spool diagnostics |
-| Go app-facing SDK entrypoint | active | Go test | `pkg/sdk.OpenLocalSite()` に加え、`pkg/fabric` が state/event/sleepy command の typed entrypoint を提供する |
-| Lease / role enforcement | limited | Go test | sleepy/battery node に always-on role を与えない gate、short ID lookup、lease bearer と manifest supported bearer の整合を実装 |
-| Payload fit / enqueue gate | limited | Go test | `sleepy_tiny_control` は enqueue 前に compact fit を確認し、lease / short ID が無いと reject。route_class 未指定の rich payload は LoRa primary に暗黙投入しない |
-| RoutePlan persistence | limited | Go test | selected bearer / route status / route reason / payload fit / route_plan_json を outbox に保存し、diagnostics / explain-route の土台にする |
+| Go app-facing SDK entrypoint | active | Go test | `pkg/sdk.OpenLocalSite()` に加え、`pkg/fabric` が state/event/sleepy command の typed entrypoint、EventID 指定、DeviceProfile 登録 option、SendResult を提供する |
+| Lease / role enforcement | limited | Go test | sleepy/battery node に always-on role を与えない gate、short ID lookup、`1..65535` short ID validation、lease bearer と manifest supported bearer の整合を実装 |
+| Payload fit / enqueue gate | limited | Go test | `sleepy_tiny_control` は enqueue 前に compact fit を確認し、lease / short ID が無いと reject。route_class 未指定の rich payload は LoRa primary に暗黙投入しない。`local_control / critical_alert / sparse_summary / bulk_wifi_only` は最小 safety gate 済み |
+| RoutePlan persistence | limited | Go test | selected bearer / route status / route reason / payload fit / route_plan_json を outbox に保存し、worker lease は `ready_to_send` のみ対象にする |
+| Radio packet observation | limited | Go test | `onair_key` は durable event identity ではなく短期 duplicate window として扱う。window 経過後の同一 sequence/body は新イベントとして許可する |
 | Command token correlation | limited | Go test | 16-bit token は compact token が必要な route だけに割り当て、target node scope で解決する。global unique 前提から外したが、lease epoch/window 化は今後 |
 | Sleepy command acceptance flow | limited | `cmd/sleepy-cycle-demo` / development backend smoke | `issue -> digest -> poll -> command_result` を short-ID aware binary on-air demo と development backend smoke で確認 |
 | Gateway runtime scaffold | prototype | コードレビュー / development backend | on-air header を優先して USB frame type を決める。`lora_ingress` heartbeat は `live=true` と subject metadata を出す。raw JSON over LoRa と legacy compact fallback は development backend 用に制限 |

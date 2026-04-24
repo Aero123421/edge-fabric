@@ -42,6 +42,7 @@ const (
 )
 
 type Event struct {
+	EventID  string
 	Source   string
 	Type     EventType
 	Severity Severity
@@ -58,6 +59,45 @@ type SleepyCommandBuilder struct {
 	payload   JSON
 	commandID string
 	expiresIn time.Duration
+}
+
+type SendResult struct {
+	MessageID string
+	CommandID string
+	QueueID   int64
+	Persisted bool
+	Duplicate bool
+	Status    string
+	Warnings  []string
+}
+
+type DeviceRegistration struct {
+	HardwareID     string
+	Profile        DeviceProfile
+	ShortID        int
+	Role           string
+	PrimaryBearer  string
+	FallbackBearer string
+}
+
+type RegistrationOption func(*DeviceRegistration)
+
+func WithRole(role string) RegistrationOption {
+	return func(registration *DeviceRegistration) {
+		registration.Role = role
+	}
+}
+
+func WithPrimaryBearer(bearer string) RegistrationOption {
+	return func(registration *DeviceRegistration) {
+		registration.PrimaryBearer = bearer
+	}
+}
+
+func WithFallbackBearer(bearer string) RegistrationOption {
+	return func(registration *DeviceRegistration) {
+		registration.FallbackBearer = bearer
+	}
 }
 
 func OpenLocal(dbPath, sourceID string) (*Client, error) {
@@ -111,7 +151,10 @@ func (c *Client) EmitEvent(ctx context.Context, event Event) (*sdk.PersistAck, e
 	if event.Flags != 0 {
 		payload["flags"] = event.Flags
 	}
-	eventID := fmt.Sprintf("%s:%s:%d", event.Source, event.Type, time.Now().UTC().UnixNano())
+	eventID := event.EventID
+	if eventID == "" {
+		eventID = fmt.Sprintf("%s:%s:%d", event.Source, event.Type, time.Now().UTC().UnixNano())
+	}
 	return c.low.EmitEvent(ctx, event.Source, eventID, service, payload, event.Priority)
 }
 
@@ -152,14 +195,26 @@ func (b *SleepyCommandBuilder) ExpiresIn(duration time.Duration) *SleepyCommandB
 }
 
 func (b *SleepyCommandBuilder) Send(ctx context.Context) (*sdk.PersistAck, int64, error) {
+	result, err := b.SendResult(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	return &sdk.PersistAck{
+		AckedMessageID: result.MessageID,
+		Status:         result.Status,
+		Duplicate:      result.Duplicate,
+	}, result.QueueID, nil
+}
+
+func (b *SleepyCommandBuilder) SendResult(ctx context.Context) (*SendResult, error) {
 	if b == nil || b.client == nil || b.client.low == nil {
-		return nil, 0, fmt.Errorf("fabric sleepy command builder is not attached to a client")
+		return nil, fmt.Errorf("fabric sleepy command builder is not attached to a client")
 	}
 	if b.target == "" {
-		return nil, 0, fmt.Errorf("sleepy command target is required")
+		return nil, fmt.Errorf("sleepy command target is required")
 	}
 	if b.payload["command_name"] == nil {
-		return nil, 0, fmt.Errorf("sleepy command requires a command builder method")
+		return nil, fmt.Errorf("sleepy command requires a command builder method")
 	}
 	options := sdk.CommandOptions{
 		CommandID:        b.commandID,
@@ -168,18 +223,51 @@ func (b *SleepyCommandBuilder) Send(ctx context.Context) (*sdk.PersistAck, int64
 		RouteClass:       "sleepy_tiny_control",
 		Priority:         "control",
 	}
+	if options.CommandID == "" {
+		options.CommandID = fmt.Sprintf("cmd-%s-%d", b.target, time.Now().UTC().UnixNano())
+	}
 	if b.expiresIn > 0 {
 		options.ExpiresAt = time.Now().UTC().Add(b.expiresIn)
 	}
-	return b.client.low.IssueCommand(ctx, b.target, map[string]any(b.payload), options)
+	ack, queueID, err := b.client.low.IssueCommand(ctx, b.target, map[string]any(b.payload), options)
+	if err != nil {
+		return nil, err
+	}
+	return &SendResult{
+		MessageID: ack.AckedMessageID,
+		CommandID: options.CommandID,
+		QueueID:   queueID,
+		Persisted: ack.Status == "persisted",
+		Duplicate: ack.Duplicate,
+		Status:    ack.Status,
+	}, nil
 }
 
-func RegisterDeviceProfile(ctx context.Context, client *Client, hardwareID string, profile DeviceProfile, shortID int) error {
+func RegisterDeviceProfile(ctx context.Context, client *Client, hardwareID string, profile DeviceProfile, shortID int, opts ...RegistrationOption) error {
+	registration := DeviceRegistration{
+		HardwareID: hardwareID,
+		Profile:    profile,
+		ShortID:    shortID,
+	}
+	for _, opt := range opts {
+		opt(&registration)
+	}
+	return RegisterDevice(ctx, client, registration)
+}
+
+func RegisterDevice(ctx context.Context, client *Client, registration DeviceRegistration) error {
 	if client == nil || client.low == nil {
 		return fmt.Errorf("fabric client is closed")
 	}
+	if registration.HardwareID == "" {
+		return fmt.Errorf("device hardware_id is required")
+	}
+	if registration.ShortID < 0 || registration.ShortID > 0xFFFF {
+		return fmt.Errorf("fabric short ID must be between 1 and 65535 when set")
+	}
+	profile := registration.Profile
 	manifest := &contracts.Manifest{
-		HardwareID:          hardwareID,
+		HardwareID:          registration.HardwareID,
 		DeviceFamily:        profile.DeviceFamily,
 		PowerClass:          profile.PowerClass,
 		WakeClass:           profile.WakeClass,
@@ -187,23 +275,32 @@ func RegisterDeviceProfile(ctx context.Context, client *Client, hardwareID strin
 		AllowedNetworkRoles: append([]string(nil), profile.AllowedRoles...),
 		Firmware:            map[string]any{"device_profile": profile.ID},
 	}
-	if err := client.low.RegisterManifest(ctx, hardwareID, manifest); err != nil {
+	if err := client.low.RegisterManifest(ctx, registration.HardwareID, manifest); err != nil {
 		return err
 	}
 	if len(profile.AllowedRoles) == 0 || len(profile.SupportedBearers) == 0 {
 		return nil
 	}
+	role := registration.Role
+	if role == "" {
+		role = profile.AllowedRoles[0]
+	}
+	primaryBearer := registration.PrimaryBearer
+	if primaryBearer == "" {
+		primaryBearer = profile.SupportedBearers[0]
+	}
 	lease := &contracts.Lease{
-		RoleLeaseID:      "lease-" + hardwareID,
+		RoleLeaseID:      "lease-" + registration.HardwareID,
 		SiteID:           "local",
-		LogicalBindingID: "binding-" + hardwareID,
-		EffectiveRole:    profile.AllowedRoles[0],
-		PrimaryBearer:    profile.SupportedBearers[0],
+		LogicalBindingID: "binding-" + registration.HardwareID,
+		EffectiveRole:    role,
+		PrimaryBearer:    primaryBearer,
+		FallbackBearer:   registration.FallbackBearer,
 	}
-	if shortID > 0 {
-		lease.FabricShortID = &shortID
+	if registration.ShortID > 0 {
+		lease.FabricShortID = &registration.ShortID
 	}
-	return client.low.RegisterLease(ctx, hardwareID, lease)
+	return client.low.RegisterLease(ctx, registration.HardwareID, lease)
 }
 
 func cloneJSON(payload JSON) JSON {

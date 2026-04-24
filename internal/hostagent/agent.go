@@ -668,7 +668,8 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 			Target:        contracts.TargetRef{Kind: "host", Value: "site-router"},
 			MeshMeta:      onairMeshMeta(packet),
 			Payload: map[string]any{
-				"gateway_id":        hardwareID,
+				"subject_kind":      "node",
+				"subject_id":        hardwareID,
 				"live":              true,
 				"status":            "onair_heartbeat",
 				"health":            heartbeatHealthFromToken(body.Health),
@@ -703,7 +704,8 @@ func onairShape(packet *onair.Packet, logicalName string) (string, string, strin
 
 func controlHeartbeatEnvelope(hardwareID string, shortID uint16, packet *onair.Packet, status string, payload map[string]any) *contracts.Envelope {
 	payload = cloneMap(payload)
-	payload["gateway_id"] = hardwareID
+	payload["subject_kind"] = "node"
+	payload["subject_id"] = hardwareID
 	payload["live"] = true
 	payload["status"] = status
 	payload["source_short_id"] = shortID
