@@ -7,6 +7,7 @@ idf_component_register(
         "."
     REQUIRES
         board_xiao_sx1262
+        fabric_proto
         freertos
         radio_hal_sx1262
 )

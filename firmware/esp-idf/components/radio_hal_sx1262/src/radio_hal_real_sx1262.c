@@ -252,7 +252,8 @@ static esp_err_t sx1262_real_backend_poll_rx(radio_hal_frame_t *frame, void *con
             ESP_LOGE(TAG, "get rx buffer status failed: %s", esp_err_to_name(err));
             goto unlock;
         }
-        if (rx_status.pld_len_in_bytes > sizeof(frame->payload)) {
+        const size_t payload_len = rx_status.pld_len_in_bytes;
+        if (payload_len > sizeof(frame->payload)) {
             err = sx1262_real_set_rx_continuous(backend);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "rearm rx after oversize failed: %s", esp_err_to_name(err));
@@ -262,7 +263,7 @@ static esp_err_t sx1262_real_backend_poll_rx(radio_hal_frame_t *frame, void *con
             goto unlock;
         }
         err = sx1262_status_to_esp_err(
-            sx126x_read_buffer(backend, rx_status.buffer_start_pointer, frame->payload, rx_status.pld_len_in_bytes));
+            sx126x_read_buffer(backend, rx_status.buffer_start_pointer, frame->payload, payload_len));
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "read rx buffer failed: %s", esp_err_to_name(err));
             goto unlock;
@@ -272,7 +273,7 @@ static esp_err_t sx1262_real_backend_poll_rx(radio_hal_frame_t *frame, void *con
             ESP_LOGE(TAG, "get pkt status failed: %s", esp_err_to_name(err));
             goto unlock;
         }
-        frame->payload_len = rx_status.pld_len_in_bytes;
+        frame->payload_len = payload_len;
         frame->rssi_dbm = pkt_status.rssi_pkt_in_dbm;
         frame->snr_db = pkt_status.snr_pkt_in_db;
         err = sx1262_real_set_rx_continuous(backend);

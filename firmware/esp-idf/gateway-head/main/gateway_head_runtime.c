@@ -1,6 +1,7 @@
 #include "fabric_proto/fabric_proto.h"
 #include "board_xiao_sx1262.h"
 #include "gateway_head_backends.h"
+#include "gateway_head_runtime.h"
 #include "radio_hal_sx1262.h"
 #include "radio_hal_real_sx1262.h"
 #include "usb_link.h"

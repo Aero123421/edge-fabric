@@ -9,6 +9,7 @@ __pycache__/
 .mypy_cache/
 dist/
 build/
+firmware/esp-idf/*/sdkconfig
 .artifacts/
 *.egg-info/
 .tools/

@@ -11,4 +11,6 @@ idf_component_register(
         board_xiao_sx1262
         driver
         freertos
+    PRIV_REQUIRES
+        esp_timer
 )

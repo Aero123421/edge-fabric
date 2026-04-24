@@ -20,23 +20,30 @@ def load_json(path: Path) -> dict:
 
 
 TOOL_TIMEOUT_SECONDS = 5
+IDF_TOOL_TIMEOUT_SECONDS = 30
 
 
-def optional_tool_version(command: list[str], env: dict[str, str] | None = None) -> str:
+def optional_tool_version(
+    command: list[str],
+    env: dict[str, str] | None = None,
+    timeout_seconds: int = TOOL_TIMEOUT_SECONDS,
+) -> str:
     executable = shutil.which(command[0])
     if executable is None:
         return "missing"
     try:
         result = subprocess.run(
-            command,
+            [executable, *command[1:]],
             capture_output=True,
             text=True,
             check=False,
-            timeout=TOOL_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             env=env,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         return "error"
+    except subprocess.TimeoutExpired:
+        return "timeout"
     if result.returncode != 0:
         return "error"
     return (result.stdout or result.stderr).strip().splitlines()[0]
@@ -131,13 +138,13 @@ def main(argv: list[str] | None = None) -> int:
     go_env = dict(os.environ)
     go_env["GOTOOLCHAIN"] = "local"
     go_version = optional_tool_version(["go", "version"], env=go_env)
-    idf_version = optional_tool_version(["idf.py", "--version"])
+    idf_version = optional_tool_version(["idf.py", "--version"], timeout_seconds=IDF_TOOL_TIMEOUT_SECONDS)
     print(f"Go: {go_version}")
     print(f"idf.py: {idf_version}")
-    if args.require_go and go_version in {"missing", "error"}:
+    if args.require_go and go_version in {"missing", "error", "timeout"}:
         print("Go toolchain is required and must be runnable for this doctor mode")
         return 1
-    if args.require_idf and idf_version in {"missing", "error"}:
+    if args.require_idf and idf_version in {"missing", "error", "timeout"}:
         print("idf.py is required and must be runnable for this doctor mode")
         return 1
     parsed_go = parse_go_version_line(go_version)
