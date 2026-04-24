@@ -1,0 +1,11 @@
+menu "Edge Fabric Gateway"
+
+config EDGE_FABRIC_REQUIRE_REAL_BACKENDS
+    bool "Fail startup when TinyUSB/SX1262 real backends are unavailable"
+    default n
+    help
+        Production-oriented guard. When enabled, gateway-head refuses to
+        fall back to the development USB/radio backends if real backend
+        initialization fails.
+
+endmenu

@@ -596,9 +596,9 @@ func (r *Router) recordDuplicateRadioObservation(ctx context.Context, tx *sql.Tx
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE radio_packet_observation
-		SET last_message_id = ?, last_ingress_id = ?, observed_count = observed_count + 1, last_seen_at = ?
+		SET last_ingress_id = ?, observed_count = observed_count + 1, last_seen_at = ?
 		WHERE packet_key = ?
-	`, envelope.MessageID, ingressID, now, packetKey); err != nil {
+	`, ingressID, now, packetKey); err != nil {
 		return "", err
 	}
 	return duplicate, nil
@@ -1129,25 +1129,75 @@ func (r *Router) IssueCommand(ctx context.Context, envelope *contracts.Envelope,
 	if envelope.Kind != "command" {
 		return nil, 0, contracts.NewValidationError("IssueCommand requires kind=command")
 	}
-	if _, err := r.PlanOutboundRoute(ctx, envelope); err != nil {
+	if err := envelope.Validate(); err != nil {
 		return nil, 0, err
 	}
-	ack, err := r.Ingest(ctx, envelope, ingressID)
+	plan, err := r.PlanOutboundRoute(ctx, envelope)
 	if err != nil {
 		return nil, 0, err
 	}
-	if queueKey == "" {
-		if envelope.CommandID != "" {
-			queueKey = "command:" + envelope.CommandID
-		} else {
-			queueKey = "message:" + envelope.MessageID
+	queueKey = commandQueueKey(envelope, queueKey)
+	rawEnvelope, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, 0, err
+	}
+	persistedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer tx.Rollback()
+	duplicate, err := r.lookupDuplicate(ctx, tx, envelope)
+	if err != nil {
+		return nil, 0, err
+	}
+	if duplicate != "" {
+		queueID, err := r.outboxQueueIDTx(ctx, tx, queueKey)
+		if err != nil {
+			return nil, 0, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, 0, err
+		}
+		return &PersistAck{AckedMessageID: duplicate, Status: "duplicate", Duplicate: true}, queueID, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO messages (
+			message_id, kind, dedupe_key, event_id, command_id, occurred_at,
+			source_hardware_id, ingress_id, envelope_json, persisted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, envelope.MessageID, envelope.Kind, envelope.DedupeKey(), envelope.EventID, envelope.CommandID,
+		envelope.OccurredAt, envelope.Source.HardwareID, ingressID, string(rawEnvelope), persistedAt); err != nil {
+		if isConstraintError(err) {
+			_ = tx.Rollback()
+			ack, dupErr := r.ingestDuplicateAck(ctx, envelope)
+			return ack, 0, dupErr
+		}
+		return nil, 0, err
+	}
+	if envelope.CommandID != "" {
+		commandToken := payloadInt64(envelope.Payload, "command_token")
+		commandTokenScope := commandTokenScopeForEnvelope(envelope)
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO command_ledger (command_id, command_token, command_token_scope, message_id, state, envelope_json, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, envelope.CommandID, nullableInt64(commandToken), commandTokenScope, envelope.MessageID, "issued", string(rawEnvelope), persistedAt); err != nil {
+			if isConstraintError(err) {
+				_ = tx.Rollback()
+				ack, dupErr := r.ingestDuplicateAck(ctx, envelope)
+				return ack, 0, dupErr
+			}
+			return nil, 0, err
 		}
 	}
-	queueID, err := r.EnqueueOutbound(ctx, envelope, queueKey)
+	queueID, err := r.enqueueOutboundTx(ctx, tx, envelope, queueKey, plan, string(rawEnvelope), persistedAt)
 	if err != nil {
 		return nil, 0, err
 	}
-	return ack, queueID, nil
+	if err := tx.Commit(); err != nil {
+		return nil, 0, err
+	}
+	return &PersistAck{AckedMessageID: envelope.MessageID, Status: "persisted", Duplicate: false}, queueID, nil
 }
 
 func (r *Router) validateOutboundEnvelope(ctx context.Context, envelope *contracts.Envelope) error {
@@ -1272,10 +1322,10 @@ func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, 
 		return plan
 	}
 	if bearerIsLoRa(bearer) && allowLoRaIfRepresentable {
-		bytes := payloadDeclaredBytes(envelope.Payload)
+		bytes, source := compactPayloadBodyBytes(envelope)
 		if bytes <= 0 {
 			plan.PayloadFit = false
-			plan.Reason = "lora_requires_declared_compact_payload"
+			plan.Reason = "lora_requires_compact_payload"
 			return plan
 		}
 		cap, err := jp.BodyCapForProfile(jpProfilePath(), "JP125_LONG_SF10", false)
@@ -1287,6 +1337,7 @@ func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, 
 			return plan
 		}
 		plan.Detail["payload_bytes"] = bytes
+		plan.Detail["payload_fit_source"] = source
 		plan.Detail["profile"] = "JP125_LONG_SF10"
 	}
 	return plan
@@ -1300,6 +1351,30 @@ func (r *Router) EnqueueOutbound(ctx context.Context, envelope *contracts.Envelo
 	if err != nil {
 		return 0, err
 	}
+	if queueKey == "" {
+		queueKey = "message:" + envelope.MessageID
+	}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	id, err := r.enqueueOutboundTx(ctx, tx, envelope, queueKey, plan, string(raw), now)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func (r *Router) enqueueOutboundTx(ctx context.Context, tx *sql.Tx, envelope *contracts.Envelope, queueKey string, plan *RoutePlan, rawEnvelope string, now string) (int64, error) {
 	routePlanJSON, err := json.Marshal(plan)
 	if err != nil {
 		return 0, err
@@ -1315,15 +1390,7 @@ func (r *Router) EnqueueOutbound(ctx context.Context, envelope *contracts.Envelo
 		routeReason = plan.Reason
 		payloadFit = plan.PayloadFit
 	}
-	if queueKey == "" {
-		queueKey = "message:" + envelope.MessageID
-	}
-	raw, err := json.Marshal(envelope)
-	if err != nil {
-		return 0, err
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := r.db.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO outbox_queue (
 			queue_key, message_id, target_kind, target_value, priority, envelope_json,
 			status, route_status, selected_bearer, selected_gateway_id, route_reason, payload_fit,
@@ -1331,20 +1398,27 @@ func (r *Router) EnqueueOutbound(ctx context.Context, envelope *contracts.Envelo
 		) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(queue_key) DO NOTHING
 	`, queueKey, envelope.MessageID, envelope.Target.Kind, envelope.Target.Value,
-		envelope.Priority, string(raw), routeStatus, selectedBearer, selectedGatewayID, routeReason,
+		envelope.Priority, rawEnvelope, routeStatus, selectedBearer, selectedGatewayID, routeReason,
 		boolToInt(payloadFit), string(routePlanJSON), now, now)
 	if err != nil {
 		return 0, err
 	}
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
-		var id int64
-		if err := r.db.QueryRowContext(ctx, `SELECT id FROM outbox_queue WHERE queue_key = ?`, queueKey).Scan(&id); err != nil {
-			return 0, err
-		}
-		return id, nil
+		return r.outboxQueueIDTx(ctx, tx, queueKey)
 	}
 	return result.LastInsertId()
+}
+
+func (r *Router) outboxQueueIDTx(ctx context.Context, tx *sql.Tx, queueKey string) (int64, error) {
+	var id int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM outbox_queue WHERE queue_key = ?`, queueKey).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return id, nil
 }
 
 func (r *Router) OutboxRoutePlan(ctx context.Context, queueID int64) (*OutboxRoutePlanRecord, error) {
@@ -1598,6 +1672,7 @@ func (r *Router) PendingCommandsForNode(ctx context.Context, targetHardwareID st
 		WHERE target_kind = 'node'
 		  AND target_value = ?
 		  AND status IN ('queued', 'leased', 'sending')
+		  AND route_status = 'ready_to_send'
 		ORDER BY created_at DESC
 		LIMIT ?
 	`, targetHardwareID, limit)
@@ -1648,6 +1723,31 @@ func (r *Router) PendingCommandsForNode(ctx context.Context, targetHardwareID st
 }
 
 func (r *Router) LatestHeartbeat(ctx context.Context, heartbeatKey string) (*HeartbeatRecord, error) {
+	record, err := r.latestHeartbeatByKey(ctx, heartbeatKey)
+	if err != nil || record != nil {
+		return record, err
+	}
+	if strings.HasPrefix(heartbeatKey, "short:") {
+		return r.latestHeartbeatByKey(ctx, "node:"+heartbeatKey)
+	}
+	if strings.Contains(heartbeatKey, ":") {
+		return nil, nil
+	}
+	// Backwards-compatible lookup for callers that still pass a bare gateway/node id.
+	if record, err = r.latestHeartbeatByKey(ctx, "gateway:"+heartbeatKey); err != nil || record != nil {
+		return record, err
+	}
+	return r.latestHeartbeatByKey(ctx, "node:"+heartbeatKey)
+}
+
+func (r *Router) LatestHeartbeatBySubject(ctx context.Context, subjectKind, subjectID string) (*HeartbeatRecord, error) {
+	if subjectKind == "" || subjectID == "" {
+		return nil, contracts.NewValidationError("heartbeat subject_kind and subject_id are required")
+	}
+	return r.latestHeartbeatByKey(ctx, subjectKind+":"+subjectID)
+}
+
+func (r *Router) latestHeartbeatByKey(ctx context.Context, heartbeatKey string) (*HeartbeatRecord, error) {
 	var (
 		gatewayID   string
 		subjectKind string
@@ -2179,6 +2279,19 @@ func routeStatusForPlan(plan *RoutePlan) string {
 	return "ready_to_send"
 }
 
+func commandQueueKey(envelope *contracts.Envelope, queueKey string) string {
+	if queueKey != "" {
+		return queueKey
+	}
+	if envelope != nil && envelope.CommandID != "" {
+		return "command:" + envelope.CommandID
+	}
+	if envelope != nil {
+		return "message:" + envelope.MessageID
+	}
+	return "message:"
+}
+
 func payloadDeclaredBytes(payload map[string]any) int {
 	for _, key := range []string{"payload_bytes", "body_bytes", "summary_bytes", "compact_bytes"} {
 		if value := payloadInt64(payload, key); value != nil && *value > 0 && *value <= int64(^uint(0)>>1) {
@@ -2186,6 +2299,81 @@ func payloadDeclaredBytes(payload map[string]any) int {
 		}
 	}
 	return 0
+}
+
+func compactPayloadBodyBytes(envelope *contracts.Envelope) (int, string) {
+	if envelope == nil {
+		return 0, ""
+	}
+	switch envelope.Kind {
+	case "event":
+		if eventBodyRepresentable(envelope.Payload) {
+			return len([]byte{0, 0, 0, 0}), "onair_event_body"
+		}
+	case "heartbeat":
+		if heartbeatBodyRepresentable(envelope.Payload) {
+			return len([]byte{0, 0, 0, 0, 0}), "onair_heartbeat_body"
+		}
+	case "state":
+		if stateBodyRepresentable(envelope.Payload) {
+			return len([]byte{0, 0, 0}), "onair_state_body"
+		}
+	}
+	if declared := payloadDeclaredBytes(envelope.Payload); declared > 0 {
+		return declared, "declared_alpha"
+	}
+	return 0, ""
+}
+
+func eventBodyRepresentable(payload map[string]any) bool {
+	return payloadByteValue(payload, "event_code") > 0 ||
+		eventCodeToken(payloadString(payload, "event_type")) > 0 ||
+		eventCodeToken(payloadString(payload, "event_name")) > 0
+}
+
+func heartbeatBodyRepresentable(payload map[string]any) bool {
+	return payloadByteValue(payload, "health") > 0 ||
+		payloadByteValue(payload, "health_code") > 0 ||
+		payloadByteValue(payload, "battery_bucket") > 0 ||
+		payloadByteValue(payload, "link_quality") > 0 ||
+		payloadByteValue(payload, "uptime_bucket") > 0 ||
+		payloadByteValue(payload, "flags") > 0
+}
+
+func stateBodyRepresentable(payload map[string]any) bool {
+	key := payloadString(payload, "state_key")
+	if key == "" {
+		key = payloadString(payload, "key")
+	}
+	if key == "node.power" {
+		return true
+	}
+	return payloadByteValue(payload, "key_token") > 0 && payloadByteValue(payload, "value_token") > 0
+}
+
+func eventCodeToken(value string) int {
+	switch strings.ToLower(value) {
+	case "battery_low":
+		return int(onair.EventCodeBatteryLow)
+	case "motion_detected":
+		return int(onair.EventCodeMotionDetected)
+	case "leak_detected":
+		return int(onair.EventCodeLeakDetected)
+	case "tamper":
+		return int(onair.EventCodeTamper)
+	case "threshold_crossed":
+		return int(onair.EventCodeThresholdCrossed)
+	default:
+		return 0
+	}
+}
+
+func payloadByteValue(payload map[string]any, key string) int {
+	value := payloadInt64(payload, key)
+	if value == nil || *value < 0 || *value > 0xFF {
+		return 0
+	}
+	return int(*value)
 }
 
 func payloadString(payload map[string]any, key string) string {
@@ -2233,15 +2421,16 @@ func cloneMap(value map[string]any) map[string]any {
 }
 
 func heartbeatKeyForEnvelope(envelope *contracts.Envelope) string {
+	subjectKind := heartbeatSubjectKind(envelope)
 	subjectID := payloadString(envelope.Payload, "subject_id")
 	if subjectID != "" {
-		return subjectID
+		return subjectKind + ":" + subjectID
 	}
 	gatewayID := payloadString(envelope.Payload, "gateway_id")
 	if gatewayID != "" {
-		return gatewayID
+		return "gateway:" + gatewayID
 	}
-	return envelope.Source.HardwareID
+	return subjectKind + ":" + envelope.Source.HardwareID
 }
 
 func heartbeatSubjectID(envelope *contracts.Envelope) string {
@@ -2405,7 +2594,7 @@ func findJPProfileCap(file *jp.ProfileFile, name string) (int, error) {
 
 func leaseRoleRequiresAlwaysOn(role string) bool {
 	switch role {
-	case "lora_relay", "mesh_router", "mesh_root", "ack_owner", "powered_leaf":
+	case "lora_relay", "mesh_router", "mesh_root", "ack_owner", "powered_leaf", "dual_bearer_bridge", "gateway_head":
 		return true
 	default:
 		return false

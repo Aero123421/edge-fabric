@@ -40,7 +40,7 @@ backend 差し込み面:
 起動条件:
 
 - `gateway_head_runtime_start()` は delivery path が未設定だと `ESP_ERR_INVALID_STATE` を返します
-- `main.c` は TinyUSB が有効な build では `gateway_head_runtime_use_real_backends()` を優先しますが、prototype path の初期化に失敗した場合は warning を出して `gateway_head_runtime_use_default_backends()` にフォールバックします
+- `main.c` は TinyUSB が有効な build では `gateway_head_runtime_use_real_backends()` を優先します。`CONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS=y` の build では prototype path の初期化に失敗した時点で fail-fast し、development backend へフォールバックしません。未設定時だけ warning を出して `gateway_head_runtime_use_default_backends()` にフォールバックします
 - 実機 backend に差し替える場合は
   `gateway_head_runtime_use_real_backends() -> gateway_head_runtime_start()`
   もしくは

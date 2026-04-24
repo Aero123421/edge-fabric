@@ -39,9 +39,20 @@ type PendingCommandDigest struct {
 	Urgent           bool   `json:"urgent"`
 }
 
+type RoutePlanSummary struct {
+	QueueID           int64          `json:"queue_id"`
+	RouteStatus       string         `json:"route_status"`
+	SelectedBearer    string         `json:"selected_bearer,omitempty"`
+	SelectedGatewayID string         `json:"selected_gateway_id,omitempty"`
+	RouteReason       string         `json:"route_reason,omitempty"`
+	PayloadFit        bool           `json:"payload_fit"`
+	Detail            map[string]any `json:"detail,omitempty"`
+}
+
 type ClientBackend interface {
 	IngestEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID string) (*PersistAck, error)
 	IssueCommandEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID, queueKey string) (*PersistAck, int64, error)
+	OutboxRoutePlan(ctx context.Context, queueID int64) (*RoutePlanSummary, error)
 	UpsertManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error
 	UpsertLease(ctx context.Context, hardwareID string, lease *contracts.Lease) error
 	CommandState(ctx context.Context, commandID string) (string, error)
@@ -198,6 +209,10 @@ func (c *LocalSiteRouterClient) PendingCommandDigest(ctx context.Context, target
 	return c.backend.PendingCommandDigest(ctx, targetNode, now)
 }
 
+func (c *LocalSiteRouterClient) OutboxRoutePlan(ctx context.Context, queueID int64) (*RoutePlanSummary, error) {
+	return c.backend.OutboxRoutePlan(ctx, queueID)
+}
+
 func newMessageID() string {
 	var suffix [4]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
@@ -287,6 +302,22 @@ func (b *siteRouterBackend) IssueCommandEnvelope(ctx context.Context, envelope *
 		return nil, 0, err
 	}
 	return fromRouterAck(ack), queueID, nil
+}
+
+func (b *siteRouterBackend) OutboxRoutePlan(ctx context.Context, queueID int64) (*RoutePlanSummary, error) {
+	record, err := b.router.OutboxRoutePlan(ctx, queueID)
+	if err != nil || record == nil {
+		return nil, err
+	}
+	return &RoutePlanSummary{
+		QueueID:           record.QueueID,
+		RouteStatus:       record.RouteStatus,
+		SelectedBearer:    record.SelectedBearer,
+		SelectedGatewayID: record.SelectedGatewayID,
+		RouteReason:       record.RouteReason,
+		PayloadFit:        record.PayloadFit,
+		Detail:            record.Detail,
+	}, nil
 }
 
 func (b *siteRouterBackend) UpsertManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error {

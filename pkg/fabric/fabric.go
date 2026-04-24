@@ -42,15 +42,16 @@ const (
 )
 
 type Event struct {
-	EventID  string
-	Source   string
-	Type     EventType
-	Severity Severity
-	Bucket   int
-	Flags    int
-	Payload  JSON
-	Priority string
-	Service  string
+	EventID        string
+	IdempotencyKey string
+	Source         string
+	Type           EventType
+	Severity       Severity
+	Bucket         int
+	Flags          int
+	Payload        JSON
+	Priority       string
+	Service        string
 }
 
 type SleepyCommandBuilder struct {
@@ -62,13 +63,19 @@ type SleepyCommandBuilder struct {
 }
 
 type SendResult struct {
-	MessageID string
-	CommandID string
-	QueueID   int64
-	Persisted bool
-	Duplicate bool
-	Status    string
-	Warnings  []string
+	MessageID         string
+	CommandID         string
+	QueueID           int64
+	Persisted         bool
+	Duplicate         bool
+	Status            string
+	RouteStatus       string
+	SelectedBearer    string
+	SelectedGatewayID string
+	RouteReason       string
+	PayloadFit        bool
+	ReadyToSend       bool
+	Warnings          []string
 }
 
 type DeviceRegistration struct {
@@ -151,7 +158,13 @@ func (c *Client) EmitEvent(ctx context.Context, event Event) (*sdk.PersistAck, e
 	if event.Flags != 0 {
 		payload["flags"] = event.Flags
 	}
+	if event.IdempotencyKey != "" {
+		payload["idempotency_key"] = event.IdempotencyKey
+	}
 	eventID := event.EventID
+	if eventID == "" && event.IdempotencyKey != "" {
+		eventID = fmt.Sprintf("%s:%s:%s", event.Source, event.Type, event.IdempotencyKey)
+	}
 	if eventID == "" {
 		eventID = fmt.Sprintf("%s:%s:%d", event.Source, event.Type, time.Now().UTC().UnixNano())
 	}
@@ -233,14 +246,29 @@ func (b *SleepyCommandBuilder) SendResult(ctx context.Context) (*SendResult, err
 	if err != nil {
 		return nil, err
 	}
-	return &SendResult{
+	result := &SendResult{
 		MessageID: ack.AckedMessageID,
 		CommandID: options.CommandID,
 		QueueID:   queueID,
 		Persisted: ack.Status == "persisted",
 		Duplicate: ack.Duplicate,
 		Status:    ack.Status,
-	}, nil
+	}
+	if queueID != 0 {
+		route, err := b.client.low.OutboxRoutePlan(ctx, queueID)
+		if err != nil {
+			return nil, err
+		}
+		if route != nil {
+			result.RouteStatus = route.RouteStatus
+			result.SelectedBearer = route.SelectedBearer
+			result.SelectedGatewayID = route.SelectedGatewayID
+			result.RouteReason = route.RouteReason
+			result.PayloadFit = route.PayloadFit
+			result.ReadyToSend = route.RouteStatus == "ready_to_send"
+		}
+	}
+	return result, nil
 }
 
 func RegisterDeviceProfile(ctx context.Context, client *Client, hardwareID string, profile DeviceProfile, shortID int, opts ...RegistrationOption) error {

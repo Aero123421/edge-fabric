@@ -384,6 +384,11 @@ class ContractTests(unittest.TestCase):
         )
         for route_class in routes:
             self.assertIn(route_class, router_source)
+        for role, policy in self._load_json("contracts/policy/role-policy.json")[
+            "roles"
+        ].items():
+            if policy.get("requires_always_on"):
+                self.assertIn(role, router_source)
         fabric_source = (ROOT / "pkg" / "fabric" / "profiles.go").read_text(encoding="utf-8")
         profiles = self._load_json("contracts/policy/device-profiles.json")["profiles"]
         for profile_id in profiles:

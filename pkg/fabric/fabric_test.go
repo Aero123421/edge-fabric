@@ -2,7 +2,10 @@ package fabric
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -30,6 +33,27 @@ func TestFabricOpenLocalPublishStateAndEmitEvent(t *testing.T) {
 		Bucket:   3,
 	}); err != nil || ack.Status != "persisted" {
 		t.Fatalf("unexpected event result ack=%+v err=%v", ack, err)
+	}
+	first, err := client.EmitEvent(context.Background(), Event{
+		IdempotencyKey: "boot-1:seq-7",
+		Source:         "motion-fabric-01",
+		Type:           EventMotionDetected,
+		Severity:       Critical,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.EmitEvent(context.Background(), Event{
+		IdempotencyKey: "boot-1:seq-7",
+		Source:         "motion-fabric-01",
+		Type:           EventMotionDetected,
+		Severity:       Critical,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Duplicate || second.AckedMessageID != first.AckedMessageID {
+		t.Fatalf("expected idempotency key duplicate, first=%+v second=%+v", first, second)
 	}
 }
 
@@ -64,6 +88,9 @@ func TestFabricDeviceProfileAndSleepyBuilder(t *testing.T) {
 	if !result.Persisted || result.QueueID == 0 || result.CommandID != "cmd-fabric-threshold-01" {
 		t.Fatalf("unexpected sleepy command result %+v", result)
 	}
+	if !result.ReadyToSend || result.RouteStatus != "ready_to_send" || result.SelectedBearer != "lora_direct" || !result.PayloadFit {
+		t.Fatalf("expected app-facing route result, got %+v", result)
+	}
 }
 
 func TestFabricRejectsOutOfRangeShortID(t *testing.T) {
@@ -76,5 +103,43 @@ func TestFabricRejectsOutOfRangeShortID(t *testing.T) {
 	})
 	if err := RegisterDeviceProfile(context.Background(), client, "sleepy-fabric-bad-short", MotionSensorBatteryProfile(), 70000); err == nil {
 		t.Fatal("expected out-of-range short ID to be rejected")
+	}
+}
+
+func TestBuiltInProfilesMatchPolicyArtifact(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "contracts", "policy", "device-profiles.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifact struct {
+		Profiles map[string]struct {
+			PowerClass       string            `json:"power_class"`
+			WakeClass        string            `json:"wake_class"`
+			AllowedRoles     []string          `json:"allowed_roles"`
+			SupportedBearers []string          `json:"supported_bearers"`
+			DefaultRoutes    map[string]string `json:"default_routes"`
+			Forbidden        map[string]bool   `json:"forbidden"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []DeviceProfile{
+		MotionSensorBatteryProfile(),
+		LeakSensorSleepyProfile(),
+		PoweredServoControllerProfile(),
+	} {
+		expected, ok := artifact.Profiles[profile.ID]
+		if !ok {
+			t.Fatalf("profile %s missing from artifact", profile.ID)
+		}
+		if profile.PowerClass != expected.PowerClass ||
+			profile.WakeClass != expected.WakeClass ||
+			!reflect.DeepEqual(profile.AllowedRoles, expected.AllowedRoles) ||
+			!reflect.DeepEqual(profile.SupportedBearers, expected.SupportedBearers) ||
+			!reflect.DeepEqual(profile.DefaultRoutes, expected.DefaultRoutes) ||
+			!reflect.DeepEqual(profile.Forbidden, expected.Forbidden) {
+			t.Fatalf("profile %s drifted from artifact: %+v expected %+v", profile.ID, profile, expected)
+		}
 	}
 }

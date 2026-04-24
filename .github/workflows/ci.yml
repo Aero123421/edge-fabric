@@ -71,3 +71,12 @@ jobs:
         run: |
           idf.py set-target esp32s3
           idf.py build
+      - name: Build gateway strict real backend config
+        if: matrix.app == 'firmware/esp-idf/gateway-head'
+        working-directory: ${{ matrix.app }}
+        run: |
+          cp sdkconfig sdkconfig.strict
+          printf '\nCONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS=y\n' >> sdkconfig.strict
+          idf.py fullclean
+          idf.py -D SDKCONFIG=sdkconfig.strict set-target esp32s3
+          idf.py -D SDKCONFIG=sdkconfig.strict build

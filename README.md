@@ -115,6 +115,9 @@ python .\scripts\doctor.py --require-go
 go run .\cmd\site-router -op doctor
 go run .\cmd\site-router -op issue-command -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
 go run .\cmd\site-router -op pending-digest -hardware-id <leaf-hardware-id>
+go run .\cmd\edge-fabric doctor
+go run .\cmd\edge-fabric explain-route -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
+go run .\cmd\edge-fabric decode-onair -hex <hex-frame>
 go run .\cmd\host-agent -mode direct-json -input .\contracts\fixtures\event-battery-alert.json
 go run .\cmd\host-agent -mode diagnostics
 go run .\cmd\direct-slice-demo
@@ -127,6 +130,8 @@ Bash:
 go test ./...
 python ./scripts/doctor.py --require-go
 go run ./cmd/site-router -op doctor
+go run ./cmd/edge-fabric doctor
+go run ./cmd/edge-fabric explain-route -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
 go run ./cmd/direct-slice-demo
 go run ./cmd/sleepy-cycle-demo
 ```
@@ -134,16 +139,20 @@ go run ./cmd/sleepy-cycle-demo
 App-facing Go entrypoint:
 
 ```go
-client, err := sdk.OpenLocalSite("site.db", "controller-01")
+client, err := fabric.OpenLocal("site.db", "controller-01")
 if err != nil {
     return err
 }
 defer client.Close()
 
-_, err = client.PublishState(ctx, "sensor-01", "temperature.c", map[string]any{"value": 24.5}, "")
+_, err = client.PublishState(ctx, fabric.State{
+    Source: "sensor-01",
+    Key: "temperature.c",
+    Value: 24.5,
+})
 ```
 
-`pkg/sdk` の mainline entrypoint は `OpenLocalSite()` / public `ClientBackend` です。`internal/siterouter` は実装詳細なので、外部アプリは直接 import しなくても local durable router を使えます。
+外向き SDK は `pkg/fabric` を優先します。`pkg/sdk` の mainline entrypoint は `OpenLocalSite()` / public `ClientBackend` で、`internal/siterouter` は実装詳細です。
 
 ### Python reference
 

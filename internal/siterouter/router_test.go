@@ -96,6 +96,13 @@ func TestOnAirPacketKeyDedupesAcrossGatewayEventIDs(t *testing.T) {
 	if ack2.AckedMessageID != first.MessageID {
 		t.Fatalf("expected duplicate ack for %s, got %s", first.MessageID, ack2.AckedMessageID)
 	}
+	var lastMessageID string
+	if err := router.db.QueryRowContext(ctx, `SELECT last_message_id FROM radio_packet_observation WHERE packet_key = ?`, packetKey).Scan(&lastMessageID); err != nil {
+		t.Fatal(err)
+	}
+	if lastMessageID != first.MessageID {
+		t.Fatalf("duplicate observation must not point last_message_id at non-persisted duplicate, got %s", lastMessageID)
+	}
 	count, err := router.CountEvents(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -301,6 +308,26 @@ func TestOccurredAtMustBeRFC3339(t *testing.T) {
 func TestIssueCommandCreatesPendingDigest(t *testing.T) {
 	router := openTestRouter(t)
 	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, "sleepy-01", &contracts.Manifest{
+		HardwareID:          "sleepy-01",
+		DeviceFamily:        "xiao-esp32s3",
+		PowerClass:          "mains",
+		WakeClass:           "always_on",
+		SupportedBearers:    []string{"wifi"},
+		AllowedNetworkRoles: []string{"powered_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "sleepy-01", &contracts.Lease{
+		RoleLeaseID:      "lease-pending-01",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-pending-01",
+		EffectiveRole:    "powered_leaf",
+		PrimaryBearer:    "wifi",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	expiresAt := time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339Nano)
 	command := &contracts.Envelope{
 		SchemaVersion: "1.0.0",
@@ -415,6 +442,26 @@ func TestPendingCommandsExcludeExpiredAndSentOK(t *testing.T) {
 	router := openTestRouter(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
+	if err := router.UpsertManifest(ctx, "sleepy-02", &contracts.Manifest{
+		HardwareID:          "sleepy-02",
+		DeviceFamily:        "xiao-esp32s3",
+		PowerClass:          "mains",
+		WakeClass:           "always_on",
+		SupportedBearers:    []string{"wifi"},
+		AllowedNetworkRoles: []string{"powered_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "sleepy-02", &contracts.Lease{
+		RoleLeaseID:      "lease-pending-02",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-pending-02",
+		EffectiveRole:    "powered_leaf",
+		PrimaryBearer:    "wifi",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	fresh := &contracts.Envelope{
 		SchemaVersion: "1.0.0",
 		MessageID:     "msg-command-fresh",
@@ -615,7 +662,8 @@ func TestSleepyTinyControlRequiresLeaseAndShortID(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := router.IssueCommand(ctx, command, "local", ""); err != nil {
+	_, queueID, err := router.IssueCommand(ctx, command, "local", "")
+	if err != nil {
 		t.Fatalf("expected sleepy_tiny_control planning to pass, got %v", err)
 	}
 	plan, err := router.PlanOutboundRoute(ctx, command)
@@ -627,10 +675,6 @@ func TestSleepyTinyControlRequiresLeaseAndShortID(t *testing.T) {
 	}
 	if plan.Detail["target_short_id"].(int) != 204 {
 		t.Fatalf("expected target short id detail, got %+v", plan.Detail)
-	}
-	_, queueID, err := router.IssueCommand(ctx, command, "local", "command:cmd-route-sleepy-01-replanned")
-	if err != nil {
-		t.Fatalf("expected route plan to be persisted with queue item, got %v", err)
 	}
 	routeRecord, err := router.OutboxRoutePlan(ctx, queueID)
 	if err != nil {
@@ -757,6 +801,13 @@ func TestRoutePendingQueueIsNotLeased(t *testing.T) {
 	}
 	if len(leases) != 0 {
 		t.Fatalf("route_pending queue must not be leased, got %+v", leases)
+	}
+	pending, err := router.PendingCommandsForNode(ctx, "node-route-pending", 8, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("route_pending queue must not wake sleepy pending digest, got %+v", pending)
 	}
 }
 
@@ -1016,12 +1067,45 @@ func TestHeartbeatSummaryAndFileChunkSemantics(t *testing.T) {
 	if _, err := router.Ingest(ctx, heartbeat, "usb-gw-alpha"); err != nil {
 		t.Fatal(err)
 	}
-	record, err := router.LatestHeartbeat(ctx, "gw-alpha")
+	record, err := router.LatestHeartbeatBySubject(ctx, "gateway", "gw-alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record == nil || record.GatewayID != "gw-alpha" || record.SubjectKind != "gateway" || record.SubjectID != "gw-alpha" || !record.Live || record.HostLink != "usb_cdc" || record.Bearer != "lora_direct" {
+	if record == nil || record.HeartbeatKey != "gateway:gw-alpha" || record.GatewayID != "gw-alpha" || record.SubjectKind != "gateway" || record.SubjectID != "gw-alpha" || !record.Live || record.HostLink != "usb_cdc" || record.Bearer != "lora_direct" {
 		t.Fatalf("unexpected heartbeat record: %+v", record)
+	}
+	legacyRecord, err := router.LatestHeartbeat(ctx, "gw-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyRecord == nil || legacyRecord.HeartbeatKey != "gateway:gw-alpha" {
+		t.Fatalf("expected legacy bare gateway lookup to resolve gateway key, got %+v", legacyRecord)
+	}
+	nodeHeartbeat := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-heartbeat-node-01",
+		Kind:          "heartbeat",
+		Priority:      "normal",
+		Source:        contracts.SourceRef{HardwareID: "node-gw-alpha"},
+		Target:        contracts.TargetRef{Kind: "host", Value: "site-router"},
+		Payload:       map[string]any{"subject_kind": "node", "subject_id": "gw-alpha", "status": "onair_heartbeat", "live": true},
+	}
+	if _, err := router.Ingest(ctx, nodeHeartbeat, "lora-gw-alpha"); err != nil {
+		t.Fatal(err)
+	}
+	nodeRecord, err := router.LatestHeartbeatBySubject(ctx, "node", "gw-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodeRecord == nil || nodeRecord.HeartbeatKey != "node:gw-alpha" || nodeRecord.SubjectKind != "node" {
+		t.Fatalf("expected node heartbeat to keep separate key, got %+v", nodeRecord)
+	}
+	gatewayRecord, err := router.LatestHeartbeatBySubject(ctx, "gateway", "gw-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gatewayRecord == nil || gatewayRecord.MessageID != "msg-heartbeat-01" {
+		t.Fatalf("node heartbeat should not overwrite gateway heartbeat, got %+v", gatewayRecord)
 	}
 
 	summary := &contracts.Envelope{

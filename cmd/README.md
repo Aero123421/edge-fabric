@@ -4,6 +4,8 @@
 
 - `site-router`
   durable core の確認、fixture ingest、pending command digest 確認
+- `edge-fabric`
+  app-facing diagnostics。`explain-route` と `decode-onair` で route / wire を説明
 - `host-agent`
   direct/USB relay、spool diagnostics、spool flush
 - `direct-slice-demo`
