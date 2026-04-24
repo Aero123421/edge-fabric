@@ -6,25 +6,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Aero123421/edge-fabric/internal/siterouter"
 	"github.com/Aero123421/edge-fabric/pkg/contracts"
 )
 
-func openRouter(t *testing.T) *siterouter.Router {
+func openClient(t *testing.T) *LocalSiteRouterClient {
 	t.Helper()
-	router, err := siterouter.Open(filepath.Join(t.TempDir(), "site-router.db"), 3)
+	client, err := OpenLocalSite(filepath.Join(t.TempDir(), "site-router.db"), "controller-sdk")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = router.Close()
+		_ = client.Close()
 	})
-	return router
+	return client
 }
 
 func TestIssueCommandBuildsPendingDigest(t *testing.T) {
-	router := openRouter(t)
-	client := NewLocalSiteRouterClient(router, "controller-sdk")
+	client := openClient(t)
 	if err := client.RegisterManifest(context.Background(), "sleepy-sdk-01", &contracts.Manifest{
 		HardwareID:          "sleepy-sdk-01",
 		DeviceFamily:        "xiao-esp32s3-sx1262",
@@ -80,19 +78,34 @@ func TestIssueCommandBuildsPendingDigest(t *testing.T) {
 }
 
 func TestOpenLocalSiteExposesUsableExternalEntryPoint(t *testing.T) {
-	client, err := OpenLocalSite(filepath.Join(t.TempDir(), "site-router.db"), "controller-sdk")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = client.Close()
-	})
+	client := openClient(t)
 	ack, err := client.PublishState(context.Background(), "sensor-sdk-01", "temperature.c", map[string]any{"value": 24.5}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ack.Status != "persisted" || ack.AckedMessageID == "" {
 		t.Fatalf("unexpected ack: %+v", ack)
+	}
+}
+
+func TestIssueCommandOnlyAllocatesTokenForCompactRoute(t *testing.T) {
+	client := openClient(t)
+	ack, queueID, err := client.IssueCommand(context.Background(), "powered-node-01", map[string]any{
+		"command_name": "relay.set",
+		"on":           true,
+	}, CommandOptions{CommandID: "cmd-rich-001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Status != "persisted" || queueID == 0 {
+		t.Fatalf("unexpected issue result: ack=%+v queueID=%d", ack, queueID)
+	}
+	resolved, err := client.backend.ResolveCommandIDByTokenForTarget(context.Background(), "powered-node-01", uint16(commandTokenForID("cmd-rich-001")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != "" {
+		t.Fatalf("rich command should not consume compact command token, resolved %s", resolved)
 	}
 }
 

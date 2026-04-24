@@ -110,9 +110,17 @@ def validate_legacy_payload_boundaries(root: Path) -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--track",
+        choices=("layout", "python", "go", "firmware", "all"),
+        default="layout",
+        help="Select which toolchain track must be enforced. Default only validates layout/contracts.",
+    )
     parser.add_argument("--require-go", action="store_true")
     parser.add_argument("--require-idf", action="store_true")
     args = parser.parse_args(argv)
+    require_go = args.require_go or args.track in {"go", "all"}
+    require_idf = args.require_idf or args.track in {"firmware", "all"}
 
     root = Path(__file__).resolve().parent.parent
     required = [
@@ -141,19 +149,21 @@ def main(argv: list[str] | None = None) -> int:
     idf_version = optional_tool_version(["idf.py", "--version"], timeout_seconds=IDF_TOOL_TIMEOUT_SECONDS)
     print(f"Go: {go_version}")
     print(f"idf.py: {idf_version}")
-    if args.require_go and go_version in {"missing", "error", "timeout"}:
+    if require_go and go_version in {"missing", "error", "timeout"}:
         print("Go toolchain is required and must be runnable for this doctor mode")
         return 1
-    if args.require_idf and idf_version in {"missing", "error", "timeout"}:
+    if require_idf and idf_version in {"missing", "error", "timeout"}:
         print("idf.py is required and must be runnable for this doctor mode")
         return 1
     parsed_go = parse_go_version_line(go_version)
-    if args.require_go and parsed_go is None:
+    if require_go and parsed_go is None:
         print("Go version could not be parsed")
         return 1
     if parsed_go is not None and parsed_go < (1, 25):
-        print("Go 1.25+ is required")
-        return 1
+        if require_go:
+            print("Go 1.25+ is required")
+            return 1
+        print("Warning: Go 1.25+ is required for the Go mainline track")
 
     missing = [path for path in required if not path.exists()]
     if missing:

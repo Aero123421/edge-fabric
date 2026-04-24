@@ -29,8 +29,8 @@
 
 - `Ubuntu Server + Go`
   開発中の本線
-- `Windows + Go toolchain bundle`
-  開発/検証向け
+- `Windows + Go`
+  標準 Go toolchain / devcontainer / CI と同じ clean source 前提の開発・検証向け
 - `Python reference`
   契約比較/fixture 検証向け
 - `ESP32-S3 + XIAO SX1262 board mapping`

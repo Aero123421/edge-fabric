@@ -421,6 +421,12 @@ func stableOnAirKey(packet *onair.Packet) string {
 	)
 }
 
+func stableOnAirEventID(packet *onair.Packet, receivedAt time.Time) string {
+	// The packet key is an 8-bit-sequence radio dedupe hint, so bucket it for
+	// durable event identity instead of treating it as globally unique forever.
+	return fmt.Sprintf("evt-%s:rx5m:%d", stableOnAirKey(packet), receivedAt.UTC().Unix()/300)
+}
+
 func onairMeshMeta(packet *onair.Packet) *contracts.MeshMeta {
 	key := stableOnAirKey(packet)
 	if key == "" {
@@ -490,6 +496,8 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 	if frameType == FrameSummaryBinary && !packet.Summary() {
 		return nil, "", errors.New("summary USB frame carried compact on-air packet")
 	}
+	receivedAt := time.Now().UTC()
+	occurredAt := receivedAt.Format(time.RFC3339Nano)
 	onairKey := stableOnAirKey(packet)
 	shortID := packet.SourceShortID
 	hardwareID := fmt.Sprintf("short:%d", shortID)
@@ -511,10 +519,10 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 		shape, wireShape, codecFamily := onairShape(packet, "state")
 		return &contracts.Envelope{
 			SchemaVersion: "1.0.0",
-			MessageID:     fmt.Sprintf("msg-compact-%d", time.Now().UTC().UnixNano()),
+			MessageID:     fmt.Sprintf("msg-compact-%d", receivedAt.UnixNano()),
 			Kind:          "state",
 			Priority:      "normal",
-			OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
+			OccurredAt:    occurredAt,
 			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "service", Value: "state"},
 			MeshMeta:      onairMeshMeta(packet),
@@ -543,11 +551,11 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 		}
 		return &contracts.Envelope{
 			SchemaVersion: "1.0.0",
-			MessageID:     fmt.Sprintf("msg-compact-%d", time.Now().UTC().UnixNano()),
+			MessageID:     fmt.Sprintf("msg-compact-%d", receivedAt.UnixNano()),
 			Kind:          "event",
 			Priority:      priority,
-			EventID:       "evt-" + onairKey,
-			OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
+			EventID:       stableOnAirEventID(packet, receivedAt),
+			OccurredAt:    occurredAt,
 			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "service", Value: "alerts"},
 			MeshMeta:      onairMeshMeta(packet),
@@ -594,11 +602,11 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 		}
 		return &contracts.Envelope{
 			SchemaVersion: "1.0.0",
-			MessageID:     fmt.Sprintf("msg-compact-%d", time.Now().UTC().UnixNano()),
+			MessageID:     fmt.Sprintf("msg-compact-%d", receivedAt.UnixNano()),
 			Kind:          "command_result",
 			Priority:      "control",
 			CommandID:     commandID,
-			OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
+			OccurredAt:    occurredAt,
 			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "client", Value: "sleepy-node-sdk"},
 			MeshMeta:      onairMeshMeta(packet),
@@ -652,10 +660,10 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 		shape, wireShape, codecFamily := onairShape(packet, "heartbeat")
 		return &contracts.Envelope{
 			SchemaVersion: "1.0.0",
-			MessageID:     fmt.Sprintf("msg-heartbeat-%d", time.Now().UTC().UnixNano()),
+			MessageID:     fmt.Sprintf("msg-heartbeat-%d", receivedAt.UnixNano()),
 			Kind:          "heartbeat",
 			Priority:      "normal",
-			OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
+			OccurredAt:    occurredAt,
 			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "host", Value: "site-router"},
 			MeshMeta:      onairMeshMeta(packet),

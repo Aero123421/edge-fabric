@@ -144,20 +144,32 @@ esp_err_t sleepy_policy_publish_state(const char *state_key, const char *value, 
 }
 
 esp_err_t sleepy_policy_emit_event(const char *event_name, const char *value) {
-    ef_onair_event_body_t body = {
+    sleepy_compact_event_t event = {
         .event_code = 0u,
         .severity = EF_ONAIR_EVENT_SEVERITY_WARNING,
         .value_bucket = 0u,
         .flags = EF_ONAIR_EVENT_FLAG_EVENT_WAKE,
     };
+    ESP_RETURN_ON_ERROR(sleepy_event_code_from_name(event_name, &event.event_code), TAG, "unsupported event");
+    event.severity = sleepy_event_severity_from_value(value);
+    event.value_bucket = sleepy_event_bucket_from_value(value);
+    event.flags = sleepy_event_flags_from_value(value);
+    return sleepy_policy_emit_compact_event(&event);
+}
+
+esp_err_t sleepy_policy_emit_compact_event(const sleepy_compact_event_t *event) {
+    ef_onair_event_body_t body = {0};
     uint8_t frame[32];
     size_t frame_len = 0u;
     uint8_t sequence;
     uint16_t short_id;
-    ESP_RETURN_ON_ERROR(sleepy_event_code_from_name(event_name, &body.event_code), TAG, "unsupported event");
-    body.severity = sleepy_event_severity_from_value(value);
-    body.value_bucket = sleepy_event_bucket_from_value(value);
-    body.flags = sleepy_event_flags_from_value(value);
+    if (event == NULL || event->event_code == 0u || event->severity == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    body.event_code = event->event_code;
+    body.severity = event->severity;
+    body.value_bucket = event->value_bucket;
+    body.flags = event->flags;
     ESP_RETURN_ON_ERROR(sleepy_policy_configure_default_identity(), TAG, "identity init failed");
     ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
     xSemaphoreTake(s_state_lock, portMAX_DELAY);

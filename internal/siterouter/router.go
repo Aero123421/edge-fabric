@@ -386,6 +386,7 @@ func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingre
 	`, envelope.MessageID, envelope.Kind, envelope.DedupeKey(), envelope.EventID, envelope.CommandID,
 		envelope.OccurredAt, envelope.Source.HardwareID, ingressID, string(rawEnvelope), persistedAt); err != nil {
 		if isConstraintError(err) {
+			_ = tx.Rollback()
 			return r.ingestDuplicateAck(ctx, envelope)
 		}
 		return nil, err
@@ -401,6 +402,7 @@ func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingre
 			`, envelope.EventID, envelope.MessageID, envelope.OccurredAt, envelope.Priority,
 				envelope.Source.HardwareID, string(rawEnvelope)); err != nil {
 				if isConstraintError(err) {
+					_ = tx.Rollback()
 					return r.ingestDuplicateAck(ctx, envelope)
 				}
 				return nil, err
@@ -419,6 +421,7 @@ func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingre
 				VALUES (?, ?, ?, ?, ?, ?, ?)
 			`, envelope.CommandID, nullableInt64(commandToken), commandTokenScope, envelope.MessageID, "issued", string(rawEnvelope), persistedAt); err != nil {
 				if isConstraintError(err) {
+					_ = tx.Rollback()
 					return r.ingestDuplicateAck(ctx, envelope)
 				}
 				return nil, err

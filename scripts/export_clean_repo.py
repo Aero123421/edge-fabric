@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 FORBIDDEN_PREFIXES = (
+    ".git/",
     ".tools/",
     ".tmp/",
     ".pytest_cache/",
@@ -61,12 +62,47 @@ def ensure_clean_worktree(root: Path) -> None:
         raise RuntimeError("refusing to export from a dirty worktree; commit or stash changes first")
 
 
+def is_git_checkout(root: Path) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def should_skip_path(relative: str) -> bool:
+    normalized = relative.replace("\\", "/")
+    for prefix in FORBIDDEN_PREFIXES:
+        if normalized == prefix.rstrip("/") or normalized.startswith(prefix) or f"/{prefix}" in normalized:
+            return True
+    if normalized in FORBIDDEN_FILES or any(normalized.endswith("/" + name) for name in FORBIDDEN_FILES):
+        return True
+    if normalized.endswith(FORBIDDEN_SUFFIXES):
+        return True
+    return any(path_part in normalized for path_part in FORBIDDEN_PATH_PARTS)
+
+
+def export_from_filesystem(root: Path, output: Path) -> None:
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root).as_posix()
+            if should_skip_path(relative):
+                continue
+            archive.write(path, relative)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parent.parent
-    if not args.allow_dirty:
+    git_checkout = is_git_checkout(root)
+    if git_checkout and not args.allow_dirty:
         try:
             ensure_clean_worktree(root)
         except RuntimeError as exc:
@@ -77,17 +113,20 @@ def main(argv: list[str] | None = None) -> int:
     output = artifacts / "edge-fabric-src.zip"
     if output.exists():
         output.unlink()
-    result = subprocess.run(
-        ["git", "archive", "--format=zip", f"--output={output}", "HEAD"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        if result.stderr:
-            print(result.stderr.strip(), file=sys.stderr)
-        return result.returncode
+    if git_checkout:
+        result = subprocess.run(
+            ["git", "archive", "--format=zip", f"--output={output}", "HEAD"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            if result.stderr:
+                print(result.stderr.strip(), file=sys.stderr)
+            return result.returncode
+    else:
+        export_from_filesystem(root, output)
     try:
         validate_export(output)
     except RuntimeError as exc:

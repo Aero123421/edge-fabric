@@ -55,10 +55,6 @@ type LocalSiteRouterClient struct {
 	sourceID string
 }
 
-func NewLocalSiteRouterClient(router *siterouter.Router, sourceID string) *LocalSiteRouterClient {
-	return NewClient(NewSiterouterBackend(router), sourceID)
-}
-
 func NewClient(backend ClientBackend, sourceID string) *LocalSiteRouterClient {
 	if sourceID == "" {
 		sourceID = "local-client"
@@ -74,7 +70,7 @@ func OpenLocalSite(dbPath, sourceID string) (*LocalSiteRouterClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewLocalSiteRouterClient(router, sourceID), nil
+	return NewClient(newSiteRouterBackend(router), sourceID), nil
 }
 
 func (c *LocalSiteRouterClient) Close() error {
@@ -139,10 +135,6 @@ func (c *LocalSiteRouterClient) IssueCommand(ctx context.Context, targetNode str
 	if commandID == "" {
 		commandID = fmt.Sprintf("cmd-%d", time.Now().UTC().UnixNano())
 	}
-	commandToken, err := c.allocateCommandToken(ctx, targetNode, commandID)
-	if err != nil {
-		return nil, 0, err
-	}
 	delivery := &contracts.DeliverySpec{
 		RouteClass:     options.RouteClass,
 		AllowRelay:     options.AllowRelay,
@@ -162,7 +154,15 @@ func (c *LocalSiteRouterClient) IssueCommand(ctx context.Context, targetNode str
 	if options.IdempotencyKey != "" {
 		commandPayload["idempotency_key"] = options.IdempotencyKey
 	}
-	commandPayload["command_token"] = commandToken
+	if routeClassRequiresCommandToken(options.RouteClass) {
+		if _, ok := commandPayload["command_token"]; !ok {
+			commandToken, err := c.allocateCommandToken(ctx, targetNode, commandID)
+			if err != nil {
+				return nil, 0, err
+			}
+			commandPayload["command_token"] = commandToken
+		}
+	}
 	envelope := &contracts.Envelope{
 		SchemaVersion: "1.0.0",
 		MessageID:     newMessageID(),
@@ -216,6 +216,10 @@ func commandTokenForID(commandID string) int {
 	return token
 }
 
+func routeClassRequiresCommandToken(routeClass string) bool {
+	return routeClass == "sleepy_tiny_control"
+}
+
 func (c *LocalSiteRouterClient) allocateCommandToken(ctx context.Context, targetNode, commandID string) (int, error) {
 	token := commandTokenForID(commandID)
 	for attempts := 0; attempts < 0xFFFF; attempts++ {
@@ -261,15 +265,15 @@ func fromRouterAck(ack *siterouter.PersistAck) *PersistAck {
 	}
 }
 
-type SiterouterBackend struct {
+type siteRouterBackend struct {
 	router *siterouter.Router
 }
 
-func NewSiterouterBackend(router *siterouter.Router) *SiterouterBackend {
-	return &SiterouterBackend{router: router}
+func newSiteRouterBackend(router *siterouter.Router) *siteRouterBackend {
+	return &siteRouterBackend{router: router}
 }
 
-func (b *SiterouterBackend) IngestEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID string) (*PersistAck, error) {
+func (b *siteRouterBackend) IngestEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID string) (*PersistAck, error) {
 	ack, err := b.router.Ingest(ctx, envelope, ingressID)
 	if err != nil {
 		return nil, err
@@ -277,7 +281,7 @@ func (b *SiterouterBackend) IngestEnvelope(ctx context.Context, envelope *contra
 	return fromRouterAck(ack), nil
 }
 
-func (b *SiterouterBackend) IssueCommandEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID, queueKey string) (*PersistAck, int64, error) {
+func (b *siteRouterBackend) IssueCommandEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID, queueKey string) (*PersistAck, int64, error) {
 	ack, queueID, err := b.router.IssueCommand(ctx, envelope, ingressID, queueKey)
 	if err != nil {
 		return nil, 0, err
@@ -285,19 +289,19 @@ func (b *SiterouterBackend) IssueCommandEnvelope(ctx context.Context, envelope *
 	return fromRouterAck(ack), queueID, nil
 }
 
-func (b *SiterouterBackend) UpsertManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error {
+func (b *siteRouterBackend) UpsertManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error {
 	return b.router.UpsertManifest(ctx, hardwareID, manifest)
 }
 
-func (b *SiterouterBackend) UpsertLease(ctx context.Context, hardwareID string, lease *contracts.Lease) error {
+func (b *siteRouterBackend) UpsertLease(ctx context.Context, hardwareID string, lease *contracts.Lease) error {
 	return b.router.UpsertLease(ctx, hardwareID, lease)
 }
 
-func (b *SiterouterBackend) CommandState(ctx context.Context, commandID string) (string, error) {
+func (b *siteRouterBackend) CommandState(ctx context.Context, commandID string) (string, error) {
 	return b.router.CommandState(ctx, commandID)
 }
 
-func (b *SiterouterBackend) PendingCommandDigest(ctx context.Context, targetHardwareID string, now time.Time) (*PendingCommandDigest, error) {
+func (b *siteRouterBackend) PendingCommandDigest(ctx context.Context, targetHardwareID string, now time.Time) (*PendingCommandDigest, error) {
 	digest, err := b.router.PendingCommandDigest(ctx, targetHardwareID, now)
 	if err != nil {
 		return nil, err
@@ -311,11 +315,11 @@ func (b *SiterouterBackend) PendingCommandDigest(ctx context.Context, targetHard
 	}, nil
 }
 
-func (b *SiterouterBackend) ResolveCommandIDByTokenForTarget(ctx context.Context, targetHardwareID string, token uint16) (string, error) {
+func (b *siteRouterBackend) ResolveCommandIDByTokenForTarget(ctx context.Context, targetHardwareID string, token uint16) (string, error) {
 	return b.router.ResolveCommandIDByTokenForTarget(ctx, targetHardwareID, token)
 }
 
-func (b *SiterouterBackend) Close() error {
+func (b *siteRouterBackend) Close() error {
 	if b == nil || b.router == nil {
 		return nil
 	}

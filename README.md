@@ -154,7 +154,9 @@ python .\scripts\simulate_direct_slice.py
 python .\scripts\export_clean_repo.py
 ```
 
-`export_clean_repo.py` は既定で clean worktree を要求し、`HEAD` の source zip を作ります。`--allow-dirty` は maintainer 向けのローカル確認用で、未コミット変更を zip に含めません。
+`doctor.py` の既定モードは layout / contract の健全性を見ます。Go / firmware toolchain を必須化する場合は `--track go` / `--track firmware` / `--track all` または `--require-go` / `--require-idf` を使います。
+
+`export_clean_repo.py` は git checkout では clean worktree を要求し、`HEAD` の source zip を作ります。生成済み source archive から実行した場合は、forbidden artifact を除外する filesystem fallback で zip を作ります。`--allow-dirty` は maintainer 向けのローカル確認用で、git checkout では未コミット変更を zip に含めません。
 
 ### ESP-IDF firmware
 

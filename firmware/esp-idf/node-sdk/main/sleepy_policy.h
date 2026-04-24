@@ -26,9 +26,17 @@ typedef struct {
     uint8_t recent_command_cursor;
 } sleepy_policy_state_t;
 
+typedef struct {
+    uint8_t event_code;
+    uint8_t severity;
+    uint8_t value_bucket;
+    uint8_t flags;
+} sleepy_compact_event_t;
+
 esp_err_t sleepy_policy_apply_defaults(void);
 esp_err_t sleepy_policy_run_cycle(void);
 esp_err_t sleepy_policy_publish_state(const char *state_key, const char *value, bool event_wake);
+esp_err_t sleepy_policy_emit_compact_event(const sleepy_compact_event_t *event);
 esp_err_t sleepy_policy_emit_event(const char *event_name, const char *value);
 esp_err_t sleepy_policy_set_maintenance_awake(bool enabled);
 esp_err_t sleepy_policy_get_state(sleepy_policy_state_t *state);

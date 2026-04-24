@@ -21,7 +21,7 @@
 | Go app-facing SDK entrypoint | active | Go test | `pkg/sdk.OpenLocalSite()` と public `ClientBackend` で、外部アプリが `internal/siterouter` を import せず local durable router を使える |
 | Lease / role enforcement | limited | Go test | sleepy/battery node に always-on role を与えない gate と short ID lookup を実装 |
 | Payload fit / enqueue gate | limited | Go test | `sleepy_tiny_control` は enqueue 前に compact fit を確認し、lease / short ID が無いと reject |
-| Command token correlation | limited | Go test | 16-bit token は target node scope で解決し、global unique 前提から外した。lease epoch/window 化は今後 |
+| Command token correlation | limited | Go test | 16-bit token は compact token が必要な route だけに割り当て、target node scope で解決する。global unique 前提から外したが、lease epoch/window 化は今後 |
 | Sleepy command acceptance flow | limited | `cmd/sleepy-cycle-demo` / development backend smoke | `issue -> digest -> poll -> command_result` を short-ID aware binary on-air demo と development backend smoke で確認 |
 | Gateway runtime scaffold | prototype | コードレビュー / development backend | on-air header を優先して USB frame type を決める。raw JSON over LoRa と legacy compact fallback は development backend 用に制限 |
 | Node runtime scaffold | prototype | development backend smoke / ESP-IDF build | synthetic digest/command を binary on-air で 1 回たどる最小スモーク。fixed compact event uplink は実装済みだが、heartbeat body と sleepy app loop への統合は継続中 |
@@ -38,7 +38,7 @@
 | --- | --- |
 | Go unit / integration | 実行中 |
 | Python reference / artifact checks | 実行中 |
-| `doctor.py --require-go` | 実行中。`go` が存在しても実行不能なら失敗 |
+| `doctor.py` | 既定は layout / contract check。`--track go` / `--require-go` は `go` が存在しても実行不能なら失敗 |
 | ESP-IDF `idf.py build` | CI smoke compile を構成済み。ローカル workspace 実行は環境依存 |
 | 実機 HIL | 未実行 |
 | soak / perf / security gate | 未完了 |

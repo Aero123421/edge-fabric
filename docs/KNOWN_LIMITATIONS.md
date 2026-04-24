@@ -19,7 +19,8 @@
 
 - Go runtime では short ID / lease / payload-fit gate を先行実装し、firmware 側も binary on-air と short ID に追随し始めたが、deep sleep と path-aware queue はまだ未完了です
 - gateway heartbeat と on-air heartbeat / digest / poll diagnostics は Host Agent から Site Router の durable heartbeat ledger に入ります
-- sleepy command の 16-bit `command_token` は target node scope で解決します。lease epoch / active window scoped token reuse は今後の hardening 対象です
+- on-air packet key は短期 radio duplicate suppression 用です。Host Agent は receiver-side time bucket を足した durable `event_id` を使いますが、lease epoch / boot counter 由来の production-grade event identity は今後の hardening 対象です
+- sleepy command の 16-bit `command_token` は `sleepy_tiny_control` など compact token が必要な route だけで割り当て、target node scope で解決します。lease epoch / active window scoped token reuse は今後の hardening 対象です
 - `sleepy_tiny_control` の compact downlink は小さい command subset を優先し、rich payload / OTA / maintenance transfer はまだ summary / maintenance path 側です
 - `Wi-Fi mesh backbone`
 - `LoRa 1-relay / 2-relay`
@@ -32,6 +33,6 @@
 
 - Go / Python の contract / integration / acceptance は増やしています
 - Python reference は legacy compact regression 用で、binary on-air の主線 validator ではありません
-- `doctor.py --require-go` は `go` が存在しても実行不能な場合に失敗します
+- `doctor.py` の既定モードは layout / contract を確認し、Go / ESP-IDF は warning に留めます。`--track go` / `--require-go` は `go` が存在しても実行不能な場合に失敗します
 - ESP-IDF は CI で `idf.py build` smoke を回し始めたが、実機 HIL はまだこの環境で回していません
 - soak / perf / security gate は release hardening の残課題です
