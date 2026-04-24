@@ -207,12 +207,13 @@ func (r *Router) init(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS command_ledger (
 			command_id TEXT PRIMARY KEY,
 			command_token INTEGER,
+			command_token_scope TEXT NOT NULL DEFAULT '',
 			message_id TEXT NOT NULL UNIQUE,
 			state TEXT NOT NULL,
 			envelope_json TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_ledger_command_token ON command_ledger(command_token) WHERE command_token IS NOT NULL;`,
+		`DROP INDEX IF EXISTS idx_command_ledger_command_token;`,
 		`CREATE TABLE IF NOT EXISTS command_execution (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			command_id TEXT NOT NULL,
@@ -308,7 +309,37 @@ func (r *Router) init(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := r.ensureCommandLedgerSchema(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (r *Router) ensureCommandLedgerSchema(ctx context.Context) error {
+	if _, err := r.db.ExecContext(ctx, `ALTER TABLE command_ledger ADD COLUMN command_token_scope TEXT NOT NULL DEFAULT ''`); err != nil {
+		lower := strings.ToLower(err.Error())
+		if !strings.Contains(lower, "duplicate column") {
+			return err
+		}
+	}
+	if _, err := r.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_command_ledger_command_token`); err != nil {
+		return err
+	}
+	if _, err := r.db.ExecContext(ctx, `
+		UPDATE command_ledger
+		SET command_token_scope = COALESCE(json_extract(envelope_json, '$.target.value'), '')
+		WHERE command_token_scope = ''
+		  AND command_token IS NOT NULL
+		  AND json_extract(envelope_json, '$.target.kind') = 'node'
+	`); err != nil {
+		return err
+	}
+	_, err := r.db.ExecContext(ctx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_command_ledger_command_token_scope
+		ON command_ledger(command_token_scope, command_token)
+		WHERE command_token IS NOT NULL
+	`)
+	return err
 }
 
 func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingressID string) (*PersistAck, error) {
@@ -369,10 +400,11 @@ func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingre
 	case "command":
 		if envelope.CommandID != "" {
 			commandToken := payloadInt64(envelope.Payload, "command_token")
+			commandTokenScope := commandTokenScopeForEnvelope(envelope)
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO command_ledger (command_id, command_token, message_id, state, envelope_json, created_at)
-				VALUES (?, ?, ?, ?, ?, ?)
-			`, envelope.CommandID, nullableInt64(commandToken), envelope.MessageID, "issued", string(rawEnvelope), persistedAt); err != nil {
+				INSERT INTO command_ledger (command_id, command_token, command_token_scope, message_id, state, envelope_json, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?)
+			`, envelope.CommandID, nullableInt64(commandToken), commandTokenScope, envelope.MessageID, "issued", string(rawEnvelope), persistedAt); err != nil {
 				if isConstraintError(err) {
 					return r.ingestDuplicateAck(ctx, envelope)
 				}
@@ -541,7 +573,19 @@ func (r *Router) recordCommandResult(ctx context.Context, tx *sql.Tx, envelope *
 		commandToken := payloadInt64(envelope.Payload, "command_token")
 		if commandToken != nil {
 			var resolved string
-			err := tx.QueryRowContext(ctx, `SELECT command_id FROM command_ledger WHERE command_token = ?`, *commandToken).Scan(&resolved)
+			scope := envelope.Source.HardwareID
+			err := tx.QueryRowContext(ctx, `
+				SELECT command_id FROM command_ledger
+				WHERE command_token_scope = ? AND command_token = ?
+			`, scope, *commandToken).Scan(&resolved)
+			if errors.Is(err, sql.ErrNoRows) && scope == "" {
+				err = tx.QueryRowContext(ctx, `
+					SELECT command_id FROM command_ledger
+					WHERE command_token = ?
+					ORDER BY created_at DESC
+					LIMIT 1
+				`, *commandToken).Scan(&resolved)
+			}
 			if err == nil {
 				commandID = resolved
 			} else if !errors.Is(err, sql.ErrNoRows) {
@@ -877,8 +921,25 @@ func (r *Router) ResolveHardwareIDByShortID(ctx context.Context, shortID uint16)
 }
 
 func (r *Router) ResolveCommandIDByToken(ctx context.Context, token uint16) (string, error) {
+	return r.ResolveCommandIDByTokenForTarget(ctx, "", token)
+}
+
+func (r *Router) ResolveCommandIDByTokenForTarget(ctx context.Context, targetHardwareID string, token uint16) (string, error) {
 	var commandID string
-	err := r.db.QueryRowContext(ctx, `SELECT command_id FROM command_ledger WHERE command_token = ?`, int(token)).Scan(&commandID)
+	var err error
+	if targetHardwareID != "" {
+		err = r.db.QueryRowContext(ctx, `
+			SELECT command_id FROM command_ledger
+			WHERE command_token_scope = ? AND command_token = ?
+		`, targetHardwareID, int(token)).Scan(&commandID)
+	} else {
+		err = r.db.QueryRowContext(ctx, `
+			SELECT command_id FROM command_ledger
+			WHERE command_token = ?
+			ORDER BY created_at DESC
+			LIMIT 1
+		`, int(token)).Scan(&commandID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -1756,6 +1817,13 @@ func deliveryIngressValue(delivery *contracts.DeliverySpec, key string) string {
 	}
 	value, _ := delivery.IngressMeta[key].(string)
 	return value
+}
+
+func commandTokenScopeForEnvelope(envelope *contracts.Envelope) string {
+	if envelope == nil || envelope.Target.Kind != "node" {
+		return ""
+	}
+	return envelope.Target.Value
 }
 
 func nullableInt64(value *int64) any {

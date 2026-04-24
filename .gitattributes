@@ -1,3 +1,17 @@
+* text=auto
+.gitattributes text eol=lf
+.gitignore text eol=lf
+*.go text eol=lf
+*.py text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
+
 .tools export-ignore
 .tmp export-ignore
 .pytest_cache export-ignore
@@ -5,4 +19,5 @@
 *.sqlite export-ignore
 *.sqlite3 export-ignore
 *.spool*.jsonl export-ignore
+*.heartbeat.json export-ignore
 *.rejected.jsonl export-ignore

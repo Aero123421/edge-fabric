@@ -556,6 +556,59 @@ func TestDuplicateCommandResultSamePhaseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestCommandTokenIsScopedByTargetNode(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	for _, target := range []string{"sleepy-token-a", "sleepy-token-b"} {
+		command := &contracts.Envelope{
+			SchemaVersion: "1.0.0",
+			MessageID:     "msg-command-" + target,
+			Kind:          "command",
+			Priority:      "control",
+			CommandID:     "cmd-" + target,
+			Source:        contracts.SourceRef{HardwareID: "controller-token"},
+			Target:        contracts.TargetRef{Kind: "node", Value: target},
+			Payload: map[string]any{
+				"command_name":  "mode.set",
+				"mode":          "maintenance_awake",
+				"command_token": 0x3301,
+			},
+		}
+		if _, err := router.Ingest(ctx, command, "local"); err != nil {
+			t.Fatalf("same command_token should be accepted for target %s: %v", target, err)
+		}
+	}
+	result := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-command-token-result-scoped",
+		Kind:          "command_result",
+		Priority:      "control",
+		Source:        contracts.SourceRef{HardwareID: "sleepy-token-b"},
+		Target:        contracts.TargetRef{Kind: "client", Value: "controller-token"},
+		Payload: map[string]any{
+			"command_token": 0x3301,
+			"phase":         "succeeded",
+		},
+	}
+	if _, err := router.Ingest(ctx, result, "local"); err != nil {
+		t.Fatal(err)
+	}
+	stateB, err := router.CommandState(ctx, "cmd-sleepy-token-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stateB != "succeeded" {
+		t.Fatalf("expected target-scoped token to resolve command B, got %s", stateB)
+	}
+	stateA, err := router.CommandState(ctx, "cmd-sleepy-token-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stateA != "issued" {
+		t.Fatalf("expected command A to remain issued, got %s", stateA)
+	}
+}
+
 func TestHeartbeatSummaryAndFileChunkSemantics(t *testing.T) {
 	router := openTestRouter(t)
 	ctx := context.Background()

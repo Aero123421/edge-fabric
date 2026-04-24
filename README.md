@@ -16,6 +16,7 @@ LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
 - app-facing API に bearer 名を出さない
 - `gateway_head` は USB CDC first
 - LoRa は `JP-safe profile` を初期条件として扱う
+- gateway heartbeat は Host Agent で `heartbeat` envelope に正規化し、Site Router の durable ledger に入れる
 - binary on-air の正本は `contracts/protocol/onair-v1.json` に置く
 - `contracts/protocol/compact-codecs.json` は legacy compact/reference track の artifact として扱う
 - `compact-codecs.json` の frame type `3/4` は USB transport family の shape 管理で、LoRa on-air header そのものの正本ではない
@@ -178,6 +179,8 @@ firmware 側の default identity は board MAC 由来で、`gw-XXXXXX` / `leaf-X
 - direct LoRa uplink
 - powered Wi-Fi direct
 - bounded queue / dedupe / persist ack
+- durable gateway heartbeat
+- target-scoped sleepy command token
 
 `contracts/fixtures/command-servo-set-angle.json` は Site Router / command ledger の汎用デモ用です。
 sleepy leaf と firmware `node-sdk` の確認には `command-sleepy-threshold-set.json` を使います。sleepy fixture は `battery-leaf-01` の manifest/lease 例に合わせています。

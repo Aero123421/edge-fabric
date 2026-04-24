@@ -67,7 +67,6 @@ esp_err_t sleepy_policy_apply_defaults(void) {
         .bandwidth_khz = 125u,
         .tx_power_dbm = 10u,
     };
-    ESP_RETURN_ON_ERROR(radio_hal_init(), TAG, "radio init failed");
     ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
     ESP_RETURN_ON_ERROR(sleepy_policy_configure_default_identity(), TAG, "identity init failed");
     return radio_hal_apply_jp_safe_profile(&profile);

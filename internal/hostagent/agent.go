@@ -50,6 +50,7 @@ type Ingester interface {
 type RuntimeResolver interface {
 	ResolveHardwareIDByShortID(context.Context, uint16) (string, error)
 	ResolveCommandIDByToken(context.Context, uint16) (string, error)
+	ResolveCommandIDByTokenForTarget(context.Context, string, uint16) (string, error)
 }
 
 type Agent struct {
@@ -86,7 +87,8 @@ func (a *Agent) RelayUSBFrame(ctx context.Context, ingressID, sessionID string, 
 		}), 0o644); err != nil {
 			return nil, err
 		}
-		return &RelayResult{Status: "heartbeat_recorded", Observation: observation}, nil
+		envelope := heartbeatEnvelope(heartbeat)
+		return a.relayEnvelope(ctx, ingressID, sessionID, "usb_cdc", &observation, envelope)
 	}
 	if frameType == FrameCompactBinary || frameType == FrameSummaryBinary {
 		envelope, status, err := decodeCompactSummaryEnvelope(ctx, runtimeResolver(a.router), frameType, payload)
@@ -341,6 +343,17 @@ func cloneEnvelope(envelope *contracts.Envelope) (*contracts.Envelope, error) {
 	return &cloned, nil
 }
 
+func cloneMap(value map[string]any) map[string]any {
+	if value == nil {
+		return map[string]any{}
+	}
+	cloned := make(map[string]any, len(value))
+	for key, item := range value {
+		cloned[key] = item
+	}
+	return cloned
+}
+
 func (a *Agent) appendJSONL(path string, record map[string]any) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -432,13 +445,15 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "service", Value: "state"},
 			Payload: map[string]any{
-				"state_key":    stateKeyFromToken(body.KeyToken),
-				"value":        stateValueFromToken(body.ValueToken),
-				"event_wake":   body.EventWake,
-				"shape":        shape,
-				"wire_shape":   wireShape,
-				"codec_family": codecFamily,
+				"state_key":       stateKeyFromToken(body.KeyToken),
+				"value":           stateValueFromToken(body.ValueToken),
+				"event_wake":      body.EventWake,
+				"shape":           shape,
+				"wire_shape":      wireShape,
+				"codec_family":    codecFamily,
 				"source_short_id": shortID,
+				"target_short_id": packet.TargetShortID,
+				"onair_sequence":  packet.Sequence,
 			},
 		}, "", nil
 	case onair.TypeCommandResult:
@@ -456,7 +471,7 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 		}
 		commandID := fmt.Sprintf("token:%d", body.CommandToken)
 		if resolver != nil {
-			resolved, err := resolver.ResolveCommandIDByToken(ctx, body.CommandToken)
+			resolved, err := resolver.ResolveCommandIDByTokenForTarget(ctx, hardwareID, body.CommandToken)
 			if err != nil {
 				return nil, "", err
 			}
@@ -482,14 +497,16 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "client", Value: "sleepy-node-sdk"},
 			Payload: map[string]any{
-				"command_id":    commandID,
-				"command_token": int(body.CommandToken),
-				"phase":         phase,
-				"result":        reason,
-				"shape":         shape,
-				"wire_shape":    wireShape,
-				"codec_family":  codecFamily,
+				"command_id":      commandID,
+				"command_token":   int(body.CommandToken),
+				"phase":           phase,
+				"result":          reason,
+				"shape":           shape,
+				"wire_shape":      wireShape,
+				"codec_family":    codecFamily,
 				"source_short_id": shortID,
+				"target_short_id": packet.TargetShortID,
+				"onair_sequence":  packet.Sequence,
 			},
 		}, "", nil
 	case onair.TypePendingDigest:
@@ -498,6 +515,23 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 		return nil, "poll_recorded", nil
 	default:
 		return nil, "", errors.New("unsupported on-air logical type")
+	}
+}
+
+func heartbeatEnvelope(payload map[string]any) *contracts.Envelope {
+	gatewayID, _ := payload["gateway_id"].(string)
+	if gatewayID == "" {
+		gatewayID = "gateway-unknown"
+	}
+	return &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     fmt.Sprintf("msg-heartbeat-%d", time.Now().UTC().UnixNano()),
+		Kind:          "heartbeat",
+		Priority:      "normal",
+		OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Source:        contracts.SourceRef{HardwareID: gatewayID},
+		Target:        contracts.TargetRef{Kind: "host", Value: "site-router"},
+		Payload:       cloneMap(payload),
 	}
 }
 

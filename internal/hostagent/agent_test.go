@@ -130,9 +130,9 @@ func TestRouterFailureSpools(t *testing.T) {
 	}
 }
 
-func TestHeartbeatStoredSeparately(t *testing.T) {
-	agent, _ := openAgentAndRouter(t)
-	frame, err := EncodeHeartbeatFrame(map[string]any{"gateway_id": "gw-01", "live": true})
+func TestHeartbeatIsPersistedAndStoredForDiagnostics(t *testing.T) {
+	agent, router := openAgentAndRouter(t)
+	frame, err := EncodeHeartbeatFrame(map[string]any{"gateway_id": "gw-01", "live": true, "status": "live"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +140,15 @@ func TestHeartbeatStoredSeparately(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "heartbeat_recorded" {
+	if result.Status != "persisted" {
 		t.Fatalf("unexpected status: %s", result.Status)
+	}
+	record, err := router.LatestHeartbeat(context.Background(), "gw-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record == nil || record.GatewayID != "gw-01" || !record.Live || record.HostLink != "usb_cdc" {
+		t.Fatalf("heartbeat was not persisted into router: %+v", record)
 	}
 	diag, err := agent.Diagnostics()
 	if err != nil {

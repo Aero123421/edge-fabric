@@ -18,6 +18,7 @@
 
 static const char *TAG = "gateway_head";
 static bool s_use_default_backends;
+static bool s_transport_initialized;
 static char s_gateway_id[32];
 
 static void gateway_head_runtime_task(void *arg);
@@ -40,8 +41,13 @@ esp_err_t gateway_head_runtime_init_transport(void) {
         .max_frame_len = 512u,
         .rx_queue_depth = 4u,
     };
+    if (s_transport_initialized) {
+        return ESP_OK;
+    }
     ESP_RETURN_ON_ERROR(radio_hal_init(), TAG, "radio init failed");
-    return usb_link_init(&usb_config);
+    ESP_RETURN_ON_ERROR(usb_link_init(&usb_config), TAG, "usb init failed");
+    s_transport_initialized = true;
+    return ESP_OK;
 }
 
 esp_err_t gateway_head_runtime_use_default_backends(void) {

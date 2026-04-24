@@ -16,6 +16,8 @@
 ## Routing
 
 - Go runtime では short ID / lease / payload-fit gate を先行実装し、firmware 側も binary on-air と short ID に追随し始めたが、deep sleep と path-aware queue はまだ未完了です
+- gateway heartbeat は Host Agent から Site Router の durable heartbeat ledger に入ります。`event` / `heartbeat` の mainline binary body codec はまだ reserved です
+- sleepy command の 16-bit `command_token` は target node scope で解決します。lease epoch / active window scoped token reuse は今後の hardening 対象です
 - `sleepy_tiny_control` の compact downlink は小さい command subset を優先し、rich payload / OTA / maintenance transfer はまだ summary / maintenance path 側です
 - `Wi-Fi mesh backbone`
 - `LoRa 1-relay / 2-relay`
@@ -28,5 +30,6 @@
 
 - Go / Python の contract / integration / acceptance は増やしています
 - Python reference は legacy compact regression 用で、binary on-air の主線 validator ではありません
+- `doctor.py --require-go` は `go` が存在しても実行不能な場合に失敗します
 - ESP-IDF は CI で `idf.py build` smoke を回し始めたが、実機 HIL はまだこの環境で回していません
 - soak / perf / security gate は release hardening の残課題です

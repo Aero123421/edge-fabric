@@ -13,8 +13,11 @@ FORBIDDEN_FILES = (
     ".tmp-site-router.db",
     "direct-slice-demo.db",
     "direct-slice-demo.spool.jsonl",
+    "direct-slice-demo.spool.heartbeat.json",
     "sleepy-cycle-demo.db",
     "sleepy-cycle-demo.spool.jsonl",
+    "sleepy-cycle-demo.spool.heartbeat.json",
+    "host-agent-spool.heartbeat.json",
 )
 
 

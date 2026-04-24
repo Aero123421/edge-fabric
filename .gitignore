@@ -16,4 +16,5 @@ build/
 bin/
 coverage.out
 *.spool*.jsonl
+*.heartbeat.json
 *.rejected.jsonl

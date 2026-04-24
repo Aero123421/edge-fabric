@@ -22,7 +22,10 @@ def optional_tool_version(command: list[str]) -> str:
     executable = shutil.which(command[0])
     if executable is None:
         return "missing"
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+    except OSError:
+        return "error"
     if result.returncode != 0:
         return "error"
     return (result.stdout or result.stderr).strip().splitlines()[0]
@@ -118,13 +121,16 @@ def main(argv: list[str] | None = None) -> int:
     idf_version = optional_tool_version(["idf.py", "--version"])
     print(f"Go: {go_version}")
     print(f"idf.py: {idf_version}")
-    if args.require_go and go_version == "missing":
-        print("Go toolchain is required for this doctor mode")
+    if args.require_go and go_version in {"missing", "error"}:
+        print("Go toolchain is required and must be runnable for this doctor mode")
         return 1
-    if args.require_idf and idf_version == "missing":
-        print("idf.py is required for this doctor mode")
+    if args.require_idf and idf_version in {"missing", "error"}:
+        print("idf.py is required and must be runnable for this doctor mode")
         return 1
     parsed_go = parse_go_version_line(go_version)
+    if args.require_go and parsed_go is None:
+        print("Go version could not be parsed")
+        return 1
     if parsed_go is not None and parsed_go < (1, 25):
         print("Go 1.25+ is required")
         return 1
@@ -140,8 +146,11 @@ def main(argv: list[str] | None = None) -> int:
         root / ".tmp-site-router.db",
         root / "direct-slice-demo.db",
         root / "direct-slice-demo.spool.jsonl",
+        root / "direct-slice-demo.spool.heartbeat.json",
         root / "sleepy-cycle-demo.db",
         root / "sleepy-cycle-demo.spool.jsonl",
+        root / "sleepy-cycle-demo.spool.heartbeat.json",
+        root / "host-agent-spool.heartbeat.json",
     ]
     present_forbidden = [path for path in forbidden_root_artifacts if path.exists()]
     if present_forbidden:

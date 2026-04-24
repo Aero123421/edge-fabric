@@ -109,7 +109,7 @@ func (c *LocalSiteRouterClient) IssueCommand(ctx context.Context, targetNode str
 	if commandID == "" {
 		commandID = fmt.Sprintf("cmd-%d", time.Now().UTC().UnixNano())
 	}
-	commandToken, err := c.allocateCommandToken(ctx, commandID)
+	commandToken, err := c.allocateCommandToken(ctx, targetNode, commandID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -196,10 +196,10 @@ func commandTokenForID(commandID string) int {
 	return token
 }
 
-func (c *LocalSiteRouterClient) allocateCommandToken(ctx context.Context, commandID string) (int, error) {
+func (c *LocalSiteRouterClient) allocateCommandToken(ctx context.Context, targetNode, commandID string) (int, error) {
 	token := commandTokenForID(commandID)
 	for attempts := 0; attempts < 0xFFFF; attempts++ {
-		resolved, err := c.router.ResolveCommandIDByToken(ctx, uint16(token))
+		resolved, err := c.router.ResolveCommandIDByTokenForTarget(ctx, targetNode, uint16(token))
 		if err != nil {
 			return 0, err
 		}
@@ -211,7 +211,7 @@ func (c *LocalSiteRouterClient) allocateCommandToken(ctx context.Context, comman
 			token = 1
 		}
 	}
-	return 0, fmt.Errorf("unable to allocate unique command token for %s", commandID)
+	return 0, fmt.Errorf("unable to allocate target-scoped command token for %s on %s", commandID, targetNode)
 }
 
 func mergePayload(base map[string]any, payload map[string]any) map[string]any {
