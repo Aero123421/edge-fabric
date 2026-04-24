@@ -69,7 +69,7 @@ func main() {
 	if !ok {
 		panic("command fixture is missing payload.command_token")
 	}
-	digestWire, err := onair.EncodePendingDigest(shortID, true, onair.PendingDigestBody{
+	digestWire, err := onair.EncodePendingDigest(shortID, true, 1, onair.PendingDigestBody{
 		PendingCount: uint8(digest.PendingCount),
 		Flags:        pendingDigestFlags(digest),
 	})
@@ -80,7 +80,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	pollWire, err := onair.EncodeTinyPoll(shortID, onair.TinyPollBody{
+	pollWire, err := onair.EncodeTinyPoll(shortID, 2, onair.TinyPollBody{
 		ServiceLevel: onair.ServiceLevelEventualNextPoll,
 	})
 	if err != nil {
@@ -90,7 +90,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	resultWire, err := onair.EncodeCommandResult(shortID, false, onair.CommandResultBody{
+	resultWire, err := onair.EncodeCommandResult(shortID, false, 3, onair.CommandResultBody{
 		CommandToken: uint16(commandToken),
 		PhaseToken:   onair.PhaseSucceeded,
 		ReasonToken:  onair.ReasonOK,

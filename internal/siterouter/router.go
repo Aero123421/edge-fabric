@@ -1734,7 +1734,7 @@ func planSleepyCompactCommand(envelope *contracts.Envelope, info *NodeRuntimeInf
 			}
 		}
 	}
-	wire, err := onair.EncodeCompactCommand(uint16(*info.Lease.FabricShortID), false, onair.CompactCommandBody{
+	wire, err := onair.EncodeCompactCommand(uint16(*info.Lease.FabricShortID), false, 0, onair.CompactCommandBody{
 		CommandToken: uint16(*commandToken),
 		CommandKind:  commandKind,
 		Argument:     argument,

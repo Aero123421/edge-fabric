@@ -1,6 +1,7 @@
 #include "sleepy_policy.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "board_xiao_sx1262.h"
@@ -59,6 +60,10 @@ static void sleepy_store_last_command_locked(uint16_t command_token);
 static const char *sleepy_phase_label(uint8_t phase_token);
 static const char *sleepy_reason_label(uint8_t reason_token);
 static esp_err_t sleepy_apply_compact_command(const ef_onair_compact_command_body_t *command);
+static esp_err_t sleepy_event_code_from_name(const char *event_name, uint8_t *event_code);
+static uint8_t sleepy_event_severity_from_value(const char *value);
+static uint8_t sleepy_event_bucket_from_value(const char *value);
+static uint8_t sleepy_event_flags_from_value(const char *value);
 
 esp_err_t sleepy_policy_apply_defaults(void) {
     static const radio_hal_lora_profile_t profile = {
@@ -139,10 +144,31 @@ esp_err_t sleepy_policy_publish_state(const char *state_key, const char *value, 
 }
 
 esp_err_t sleepy_policy_emit_event(const char *event_name, const char *value) {
-    (void)event_name;
-    (void)value;
-    ESP_LOGW(TAG, "binary compact event path is not implemented yet");
-    return ESP_ERR_NOT_SUPPORTED;
+    ef_onair_event_body_t body = {
+        .event_code = 0u,
+        .severity = EF_ONAIR_EVENT_SEVERITY_WARNING,
+        .value_bucket = 0u,
+        .flags = EF_ONAIR_EVENT_FLAG_EVENT_WAKE,
+    };
+    uint8_t frame[32];
+    size_t frame_len = 0u;
+    uint8_t sequence;
+    uint16_t short_id;
+    ESP_RETURN_ON_ERROR(sleepy_event_code_from_name(event_name, &body.event_code), TAG, "unsupported event");
+    body.severity = sleepy_event_severity_from_value(value);
+    body.value_bucket = sleepy_event_bucket_from_value(value);
+    body.flags = sleepy_event_flags_from_value(value);
+    ESP_RETURN_ON_ERROR(sleepy_policy_configure_default_identity(), TAG, "identity init failed");
+    ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    short_id = s_state.short_id;
+    sequence = sleepy_take_next_sequence_locked();
+    xSemaphoreGive(s_state_lock);
+    ESP_RETURN_ON_ERROR(
+        ef_onair_encode_event(short_id, false, sequence, &body, frame, sizeof(frame), &frame_len),
+        TAG,
+        "event encode failed");
+    return radio_hal_send_frame(frame, frame_len);
 }
 
 esp_err_t sleepy_policy_set_maintenance_awake(bool enabled) {
@@ -190,6 +216,67 @@ esp_err_t sleepy_policy_set_short_id(uint16_t short_id) {
 
 uint16_t sleepy_policy_get_short_id(void) {
     return s_state.short_id;
+}
+
+static esp_err_t sleepy_event_code_from_name(const char *event_name, uint8_t *event_code) {
+    if (event_name == NULL || event_code == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strcmp(event_name, "battery_low") == 0) {
+        *event_code = EF_ONAIR_EVENT_CODE_BATTERY_LOW;
+    } else if (strcmp(event_name, "motion_detected") == 0) {
+        *event_code = EF_ONAIR_EVENT_CODE_MOTION_DETECTED;
+    } else if (strcmp(event_name, "leak_detected") == 0) {
+        *event_code = EF_ONAIR_EVENT_CODE_LEAK_DETECTED;
+    } else if (strcmp(event_name, "tamper") == 0) {
+        *event_code = EF_ONAIR_EVENT_CODE_TAMPER;
+    } else if (strcmp(event_name, "threshold_crossed") == 0) {
+        *event_code = EF_ONAIR_EVENT_CODE_THRESHOLD_CROSSED;
+    } else {
+        ESP_LOGW(TAG, "unsupported compact event: %s", event_name);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    return ESP_OK;
+}
+
+static uint8_t sleepy_event_severity_from_value(const char *value) {
+    if (value == NULL) {
+        return EF_ONAIR_EVENT_SEVERITY_WARNING;
+    }
+    if (strstr(value, "critical") != NULL) {
+        return EF_ONAIR_EVENT_SEVERITY_CRITICAL;
+    }
+    if (strstr(value, "info") != NULL) {
+        return EF_ONAIR_EVENT_SEVERITY_INFO;
+    }
+    return EF_ONAIR_EVENT_SEVERITY_WARNING;
+}
+
+static uint8_t sleepy_event_bucket_from_value(const char *value) {
+    char *end = NULL;
+    long parsed;
+    if (value == NULL || value[0] == '\0') {
+        return 0u;
+    }
+    parsed = strtol(value, &end, 10);
+    if (end == value) {
+        return 0u;
+    }
+    if (parsed < 0) {
+        return 0u;
+    }
+    if (parsed > 255) {
+        return 255u;
+    }
+    return (uint8_t)parsed;
+}
+
+static uint8_t sleepy_event_flags_from_value(const char *value) {
+    uint8_t flags = EF_ONAIR_EVENT_FLAG_EVENT_WAKE;
+    if (value != NULL && strstr(value, "latched") != NULL) {
+        flags |= EF_ONAIR_EVENT_FLAG_LATCHED;
+    }
+    return flags;
 }
 
 static esp_err_t sleepy_policy_ensure_lock(void) {

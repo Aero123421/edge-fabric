@@ -8,7 +8,7 @@
 - `node-sdk` 側は synthetic pending digest / tiny command で RX path smoke を 1 回たどれ、scripted smoke API で分岐も再現できます
 - `gateway-head` 側には TinyUSB CDC / SX1262 real backend の prototype があります。CI smoke compile はあるが、実配線込みの HIL はまだ未確認です
 - `hop_buffered` heartbeat は local enqueue / handoff を意味し、actual radio TX completion は意味しません
-- `sleepy leaf` は sleepy-safe compact command subset と compact event / heartbeat body を優先し、rich event payload / OTA / maintenance transfer はまだ限定的です
+- `sleepy leaf` は sleepy-safe compact command subset と fixed compact event uplink を優先し、rich event payload / heartbeat uplink / OTA / maintenance transfer はまだ限定的です
 - `sleepy leaf` は light sleep まで入ったが、deep sleep / RTC wake / 完全な power-state orchestration まではまだありません
 - firmware 側の default identity は board MAC 由来になったが、lease/provisioning での正式上書きはまだ未実装です
 - binary on-air の正本は `contracts/protocol/onair-v1.json` に寄せ、`event` / `heartbeat` の固定長 body codec も active になりました。rich typed payload や domain-specific event catalog は今後の拡張です

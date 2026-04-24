@@ -43,6 +43,7 @@ type DeliverySpec struct {
 
 type MeshMeta struct {
 	MeshDomainID     string   `json:"mesh_domain_id,omitempty"`
+	OnAirKey         string   `json:"onair_key,omitempty"`
 	HopCount         *int     `json:"hop_count,omitempty"`
 	LastHop          string   `json:"last_hop,omitempty"`
 	IngressGatewayID string   `json:"ingress_gateway_id,omitempty"`
@@ -151,7 +152,7 @@ func (e *Envelope) Validate() error {
 		return NewValidationError("kind is required")
 	}
 	if _, ok := validKinds[e.Kind]; !ok {
-		return NewValidationError("kind must be one of event/state/command/command_result/manifest/lease/fabric_summary/heartbeat")
+		return NewValidationError("kind must be one of event/state/command/command_result/manifest/lease/fabric_summary/heartbeat/file_chunk")
 	}
 	if e.Priority == "" {
 		return NewValidationError("priority is required")

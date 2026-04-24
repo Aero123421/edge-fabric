@@ -183,7 +183,7 @@ func TestHeartbeatIsPersistedAndStoredForDiagnostics(t *testing.T) {
 
 func TestOnAirHeartbeatRelaysIntoRouter(t *testing.T) {
 	agent, router := openAgentAndRouter(t)
-	wire, err := onair.EncodeHeartbeat(201, false, onair.HeartbeatBody{
+	wire, err := onair.EncodeHeartbeat(201, false, 4, onair.HeartbeatBody{
 		Health:        onair.HeartbeatHealthDegraded,
 		BatteryBucket: 77,
 		LinkQuality:   41,
@@ -325,7 +325,7 @@ func TestCompactSummaryCommandResultRelaysIntoRouter(t *testing.T) {
 	if _, err := router.Ingest(context.Background(), command, "local"); err != nil {
 		t.Fatal(err)
 	}
-	wire, err := onair.EncodeCommandResult(201, false, onair.CommandResultBody{
+	wire, err := onair.EncodeCommandResult(201, false, 5, onair.CommandResultBody{
 		CommandToken: 0x1201,
 		PhaseToken:   onair.PhaseSucceeded,
 		ReasonToken:  onair.ReasonOK,
@@ -354,7 +354,7 @@ func TestCompactSummaryCommandResultRelaysIntoRouter(t *testing.T) {
 }
 
 func TestDecodeCompactSummaryPreservesWireShape(t *testing.T) {
-	wire, err := onair.EncodeState(201, false, onair.StateBody{
+	wire, err := onair.EncodeState(201, false, 6, onair.StateBody{
 		KeyToken:   onair.StateKeyNodePower,
 		ValueToken: onair.StateValueAwake,
 		EventWake:  true,
@@ -385,7 +385,7 @@ func TestDecodeCompactSummaryPreservesWireShape(t *testing.T) {
 
 func TestSummaryEventRelaysIntoRouter(t *testing.T) {
 	agent, router := openAgentAndRouter(t)
-	wire, err := onair.EncodeEvent(201, true, onair.EventBody{
+	wire, err := onair.EncodeEvent(201, true, 7, onair.EventBody{
 		EventCode:   onair.EventCodeMotionDetected,
 		Severity:    onair.EventSeverityCritical,
 		ValueBucket: 3,
@@ -416,7 +416,7 @@ func TestSummaryEventRelaysIntoRouter(t *testing.T) {
 
 func TestRepeatedOnAirEventsUseShortWindowDuplicateCache(t *testing.T) {
 	agent, router := openAgentAndRouter(t)
-	wire, err := onair.EncodeEvent(201, false, onair.EventBody{
+	wire, err := onair.EncodeEvent(201, false, 8, onair.EventBody{
 		EventCode:   onair.EventCodeMotionDetected,
 		Severity:    onair.EventSeverityWarning,
 		ValueBucket: 8,
@@ -452,13 +452,52 @@ func TestRepeatedOnAirEventsUseShortWindowDuplicateCache(t *testing.T) {
 	}
 }
 
-func TestDigestAndPollFramesBecomeControlHeartbeats(t *testing.T) {
-	agent, router := openAgentAndRouter(t)
-	digestRaw, err := onair.EncodePendingDigest(201, true, onair.PendingDigestBody{PendingCount: 1, Flags: onair.PendingFlagUrgent})
+func TestOnAirEventIDIsStableAcrossHostAgents(t *testing.T) {
+	agentA, router := openAgentAndRouter(t)
+	agentB := New(router, filepath.Join(t.TempDir(), "host-agent-b-spool.jsonl"))
+	wire, err := onair.EncodeEvent(201, false, 21, onair.EventBody{
+		EventCode:   onair.EventCodeLeakDetected,
+		Severity:    onair.EventSeverityCritical,
+		ValueBucket: 4,
+		Flags:       onair.EventFlagEventWake,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	pollRaw, err := onair.EncodeTinyPoll(201, onair.TinyPollBody{ServiceLevel: onair.ServiceLevelEventualNextPoll})
+	frame, err := usbcdc.EncodeFrame(FrameCompactBinary, wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := agentA.RelayUSBFrame(context.Background(), "gateway-a", "session-a", frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != "persisted" {
+		t.Fatalf("unexpected first status: %s", first.Status)
+	}
+	second, err := agentB.RelayUSBFrame(context.Background(), "gateway-b", "session-b", frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Status != "duplicate" {
+		t.Fatalf("expected durable duplicate across host agents, got %s", second.Status)
+	}
+	count, err := router.CountEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected stable on-air event id to dedupe across host agents, got %d", count)
+	}
+}
+
+func TestDigestAndPollFramesBecomeControlHeartbeats(t *testing.T) {
+	agent, router := openAgentAndRouter(t)
+	digestRaw, err := onair.EncodePendingDigest(201, true, 9, onair.PendingDigestBody{PendingCount: 1, Flags: onair.PendingFlagUrgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pollRaw, err := onair.EncodeTinyPoll(201, 10, onair.TinyPollBody{ServiceLevel: onair.ServiceLevelEventualNextPoll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,7 +544,7 @@ func TestInvalidCompactPayloadRejected(t *testing.T) {
 }
 
 func TestUSBFrameTypeMustMatchOnAirSummaryFlag(t *testing.T) {
-	summaryWire, err := onair.EncodeState(201, true, onair.StateBody{
+	summaryWire, err := onair.EncodeState(201, true, 11, onair.StateBody{
 		KeyToken:   onair.StateKeyNodePower,
 		ValueToken: onair.StateValueAwake,
 	})
@@ -515,7 +554,7 @@ func TestUSBFrameTypeMustMatchOnAirSummaryFlag(t *testing.T) {
 	if _, _, err := decodeCompactSummaryEnvelope(context.Background(), nil, FrameCompactBinary, summaryWire); err == nil {
 		t.Fatal("expected compact USB frame carrying summary on-air packet to be rejected")
 	}
-	compactWire, err := onair.EncodeState(201, false, onair.StateBody{
+	compactWire, err := onair.EncodeState(201, false, 12, onair.StateBody{
 		KeyToken:   onair.StateKeyNodePower,
 		ValueToken: onair.StateValueAwake,
 	})
@@ -528,7 +567,7 @@ func TestUSBFrameTypeMustMatchOnAirSummaryFlag(t *testing.T) {
 }
 
 func TestSummaryCommandResultUsesSummaryMetadata(t *testing.T) {
-	wire, err := onair.EncodeCommandResult(201, true, onair.CommandResultBody{
+	wire, err := onair.EncodeCommandResult(201, true, 13, onair.CommandResultBody{
 		CommandToken: 0x2201,
 		PhaseToken:   onair.PhaseSucceeded,
 		ReasonToken:  onair.ReasonOK,

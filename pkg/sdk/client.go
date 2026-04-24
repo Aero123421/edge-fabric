@@ -39,19 +39,49 @@ type PendingCommandDigest struct {
 	Urgent           bool   `json:"urgent"`
 }
 
+type ClientBackend interface {
+	IngestEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID string) (*PersistAck, error)
+	IssueCommandEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID, queueKey string) (*PersistAck, int64, error)
+	UpsertManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error
+	UpsertLease(ctx context.Context, hardwareID string, lease *contracts.Lease) error
+	CommandState(ctx context.Context, commandID string) (string, error)
+	PendingCommandDigest(ctx context.Context, targetHardwareID string, now time.Time) (*PendingCommandDigest, error)
+	ResolveCommandIDByTokenForTarget(ctx context.Context, targetHardwareID string, token uint16) (string, error)
+	Close() error
+}
+
 type LocalSiteRouterClient struct {
-	router   *siterouter.Router
+	backend  ClientBackend
 	sourceID string
 }
 
 func NewLocalSiteRouterClient(router *siterouter.Router, sourceID string) *LocalSiteRouterClient {
+	return NewClient(NewSiterouterBackend(router), sourceID)
+}
+
+func NewClient(backend ClientBackend, sourceID string) *LocalSiteRouterClient {
 	if sourceID == "" {
 		sourceID = "local-client"
 	}
 	return &LocalSiteRouterClient{
-		router:   router,
+		backend:  backend,
 		sourceID: sourceID,
 	}
+}
+
+func OpenLocalSite(dbPath, sourceID string) (*LocalSiteRouterClient, error) {
+	router, err := siterouter.Open(dbPath, 3)
+	if err != nil {
+		return nil, err
+	}
+	return NewLocalSiteRouterClient(router, sourceID), nil
+}
+
+func (c *LocalSiteRouterClient) Close() error {
+	if c == nil || c.backend == nil {
+		return nil
+	}
+	return c.backend.Close()
 }
 
 func (c *LocalSiteRouterClient) PublishState(ctx context.Context, hardwareID, stateKey string, payload map[string]any, priority string) (*PersistAck, error) {
@@ -68,11 +98,11 @@ func (c *LocalSiteRouterClient) PublishState(ctx context.Context, hardwareID, st
 		Target:        contracts.TargetRef{Kind: "service", Value: "state"},
 		Payload:       mergePayload(map[string]any{"state_key": stateKey}, payload),
 	}
-	ack, err := c.router.Ingest(ctx, envelope, "sdk-local")
+	ack, err := c.backend.IngestEnvelope(ctx, envelope, "sdk-local")
 	if err != nil {
 		return nil, err
 	}
-	return fromRouterAck(ack), nil
+	return ack, nil
 }
 
 func (c *LocalSiteRouterClient) EmitEvent(ctx context.Context, hardwareID, eventID, service string, payload map[string]any, priority string) (*PersistAck, error) {
@@ -90,11 +120,11 @@ func (c *LocalSiteRouterClient) EmitEvent(ctx context.Context, hardwareID, event
 		Target:        contracts.TargetRef{Kind: "service", Value: service},
 		Payload:       clonePayload(payload),
 	}
-	ack, err := c.router.Ingest(ctx, envelope, "sdk-local")
+	ack, err := c.backend.IngestEnvelope(ctx, envelope, "sdk-local")
 	if err != nil {
 		return nil, err
 	}
-	return fromRouterAck(ack), nil
+	return ack, nil
 }
 
 func (c *LocalSiteRouterClient) IssueCommand(ctx context.Context, targetNode string, payload map[string]any, options CommandOptions) (*PersistAck, int64, error) {
@@ -145,37 +175,27 @@ func (c *LocalSiteRouterClient) IssueCommand(ctx context.Context, targetNode str
 		Delivery:      delivery,
 		Payload:       commandPayload,
 	}
-	ack, queueID, err := c.router.IssueCommand(ctx, envelope, "sdk-local", "")
+	ack, queueID, err := c.backend.IssueCommandEnvelope(ctx, envelope, "sdk-local", "")
 	if err != nil {
 		return nil, 0, err
 	}
-	return fromRouterAck(ack), queueID, nil
+	return ack, queueID, nil
 }
 
 func (c *LocalSiteRouterClient) RegisterManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error {
-	return c.router.UpsertManifest(ctx, hardwareID, manifest)
+	return c.backend.UpsertManifest(ctx, hardwareID, manifest)
 }
 
 func (c *LocalSiteRouterClient) RegisterLease(ctx context.Context, hardwareID string, lease *contracts.Lease) error {
-	return c.router.UpsertLease(ctx, hardwareID, lease)
+	return c.backend.UpsertLease(ctx, hardwareID, lease)
 }
 
 func (c *LocalSiteRouterClient) ObserveCommand(ctx context.Context, commandID string) (string, error) {
-	return c.router.CommandState(ctx, commandID)
+	return c.backend.CommandState(ctx, commandID)
 }
 
 func (c *LocalSiteRouterClient) PendingCommandDigest(ctx context.Context, targetNode string, now time.Time) (*PendingCommandDigest, error) {
-	digest, err := c.router.PendingCommandDigest(ctx, targetNode, now)
-	if err != nil {
-		return nil, err
-	}
-	return &PendingCommandDigest{
-		TargetHardwareID: digest.TargetHardwareID,
-		PendingCount:     digest.PendingCount,
-		NewestCommandID:  digest.NewestCommandID,
-		ExpiresSoon:      digest.ExpiresSoon,
-		Urgent:           digest.Urgent,
-	}, nil
+	return c.backend.PendingCommandDigest(ctx, targetNode, now)
 }
 
 func newMessageID() string {
@@ -199,7 +219,7 @@ func commandTokenForID(commandID string) int {
 func (c *LocalSiteRouterClient) allocateCommandToken(ctx context.Context, targetNode, commandID string) (int, error) {
 	token := commandTokenForID(commandID)
 	for attempts := 0; attempts < 0xFFFF; attempts++ {
-		resolved, err := c.router.ResolveCommandIDByTokenForTarget(ctx, targetNode, uint16(token))
+		resolved, err := c.backend.ResolveCommandIDByTokenForTarget(ctx, targetNode, uint16(token))
 		if err != nil {
 			return 0, err
 		}
@@ -239,4 +259,65 @@ func fromRouterAck(ack *siterouter.PersistAck) *PersistAck {
 		Status:         ack.Status,
 		Duplicate:      ack.Duplicate,
 	}
+}
+
+type SiterouterBackend struct {
+	router *siterouter.Router
+}
+
+func NewSiterouterBackend(router *siterouter.Router) *SiterouterBackend {
+	return &SiterouterBackend{router: router}
+}
+
+func (b *SiterouterBackend) IngestEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID string) (*PersistAck, error) {
+	ack, err := b.router.Ingest(ctx, envelope, ingressID)
+	if err != nil {
+		return nil, err
+	}
+	return fromRouterAck(ack), nil
+}
+
+func (b *SiterouterBackend) IssueCommandEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID, queueKey string) (*PersistAck, int64, error) {
+	ack, queueID, err := b.router.IssueCommand(ctx, envelope, ingressID, queueKey)
+	if err != nil {
+		return nil, 0, err
+	}
+	return fromRouterAck(ack), queueID, nil
+}
+
+func (b *SiterouterBackend) UpsertManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error {
+	return b.router.UpsertManifest(ctx, hardwareID, manifest)
+}
+
+func (b *SiterouterBackend) UpsertLease(ctx context.Context, hardwareID string, lease *contracts.Lease) error {
+	return b.router.UpsertLease(ctx, hardwareID, lease)
+}
+
+func (b *SiterouterBackend) CommandState(ctx context.Context, commandID string) (string, error) {
+	return b.router.CommandState(ctx, commandID)
+}
+
+func (b *SiterouterBackend) PendingCommandDigest(ctx context.Context, targetHardwareID string, now time.Time) (*PendingCommandDigest, error) {
+	digest, err := b.router.PendingCommandDigest(ctx, targetHardwareID, now)
+	if err != nil {
+		return nil, err
+	}
+	return &PendingCommandDigest{
+		TargetHardwareID: digest.TargetHardwareID,
+		PendingCount:     digest.PendingCount,
+		NewestCommandID:  digest.NewestCommandID,
+		ExpiresSoon:      digest.ExpiresSoon,
+		Urgent:           digest.Urgent,
+	}, nil
+}
+
+func (b *SiterouterBackend) ResolveCommandIDByTokenForTarget(ctx context.Context, targetHardwareID string, token uint16) (string, error) {
+	return b.router.ResolveCommandIDByTokenForTarget(ctx, targetHardwareID, token)
+}
+
+func (b *SiterouterBackend) Close() error {
+	if b == nil || b.router == nil {
+		return nil
+	}
+	return b.router.Close()
 }

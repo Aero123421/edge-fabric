@@ -79,6 +79,23 @@ func TestIssueCommandBuildsPendingDigest(t *testing.T) {
 	}
 }
 
+func TestOpenLocalSiteExposesUsableExternalEntryPoint(t *testing.T) {
+	client, err := OpenLocalSite(filepath.Join(t.TempDir(), "site-router.db"), "controller-sdk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+	ack, err := client.PublishState(context.Background(), "sensor-sdk-01", "temperature.c", map[string]any{"value": 24.5}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Status != "persisted" || ack.AckedMessageID == "" {
+		t.Fatalf("unexpected ack: %+v", ack)
+	}
+}
+
 func intPtr(value int) *int {
 	return &value
 }

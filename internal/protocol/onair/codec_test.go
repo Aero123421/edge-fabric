@@ -3,7 +3,7 @@ package onair
 import "testing"
 
 func TestStateRoundTrip(t *testing.T) {
-	raw, err := EncodeState(201, false, StateBody{
+	raw, err := EncodeState(201, false, 7, StateBody{
 		KeyToken:   StateKeyNodePower,
 		ValueToken: StateValueAwake,
 		EventWake:  false,
@@ -15,7 +15,7 @@ func TestStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if packet.SourceShortID != 201 || packet.Summary() {
+	if packet.SourceShortID != 201 || packet.Sequence != 7 || packet.Summary() {
 		t.Fatalf("unexpected header: %+v", packet)
 	}
 	body, err := DecodeState(packet)
@@ -28,7 +28,7 @@ func TestStateRoundTrip(t *testing.T) {
 }
 
 func TestCompactCommandFitsJP125LongSF10(t *testing.T) {
-	raw, err := EncodeCompactCommand(201, false, CompactCommandBody{
+	raw, err := EncodeCompactCommand(201, false, 8, CompactCommandBody{
 		CommandToken: 0x1201,
 		CommandKind:  CommandKindThresholdSet,
 		Argument:     42,
@@ -54,7 +54,7 @@ func TestCompactCommandFitsJP125LongSF10(t *testing.T) {
 }
 
 func TestPendingDigestRoundTrip(t *testing.T) {
-	raw, err := EncodePendingDigest(201, true, PendingDigestBody{
+	raw, err := EncodePendingDigest(201, true, 9, PendingDigestBody{
 		PendingCount: 2,
 		Flags:        PendingFlagUrgent | PendingFlagExpiresSoon,
 	})
@@ -65,7 +65,7 @@ func TestPendingDigestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !packet.Summary() {
+	if packet.Sequence != 9 || !packet.Summary() {
 		t.Fatal("expected summary flag")
 	}
 	body, err := DecodePendingDigest(packet)
@@ -78,7 +78,7 @@ func TestPendingDigestRoundTrip(t *testing.T) {
 }
 
 func TestEventRoundTrip(t *testing.T) {
-	raw, err := EncodeEvent(201, false, EventBody{
+	raw, err := EncodeEvent(201, false, 10, EventBody{
 		EventCode:   EventCodeMotionDetected,
 		Severity:    EventSeverityCritical,
 		ValueBucket: 9,
@@ -91,7 +91,7 @@ func TestEventRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if packet.LogicalType != TypeEvent || packet.SourceShortID != 201 {
+	if packet.LogicalType != TypeEvent || packet.SourceShortID != 201 || packet.Sequence != 10 {
 		t.Fatalf("unexpected event header: %+v", packet)
 	}
 	body, err := DecodeEvent(packet)
@@ -105,7 +105,7 @@ func TestEventRoundTrip(t *testing.T) {
 }
 
 func TestHeartbeatRoundTrip(t *testing.T) {
-	raw, err := EncodeHeartbeat(201, true, HeartbeatBody{
+	raw, err := EncodeHeartbeat(201, true, 11, HeartbeatBody{
 		Health:        HeartbeatHealthDegraded,
 		BatteryBucket: 81,
 		LinkQuality:   42,
@@ -119,7 +119,7 @@ func TestHeartbeatRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if packet.LogicalType != TypeHeartbeat || !packet.Summary() {
+	if packet.LogicalType != TypeHeartbeat || packet.Sequence != 11 || !packet.Summary() {
 		t.Fatalf("unexpected heartbeat header: %+v", packet)
 	}
 	body, err := DecodeHeartbeat(packet)

@@ -124,6 +124,20 @@ go run ./cmd/direct-slice-demo
 go run ./cmd/sleepy-cycle-demo
 ```
 
+App-facing Go entrypoint:
+
+```go
+client, err := sdk.OpenLocalSite("site.db", "controller-01")
+if err != nil {
+    return err
+}
+defer client.Close()
+
+_, err = client.PublishState(ctx, "sensor-01", "temperature.c", map[string]any{"value": 24.5}, "")
+```
+
+`pkg/sdk` の mainline entrypoint は `OpenLocalSite()` / public `ClientBackend` です。`internal/siterouter` は実装詳細なので、外部アプリは直接 import しなくても local durable router を使えます。
+
 ### Python reference
 
 PowerShell:

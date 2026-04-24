@@ -172,7 +172,7 @@ func (p *Packet) Summary() bool {
 	return p != nil && (p.Flags&FlagSummary) != 0
 }
 
-func EncodeState(sourceShortID uint16, summary bool, body StateBody) ([]byte, error) {
+func EncodeState(sourceShortID uint16, summary bool, sequence byte, body StateBody) ([]byte, error) {
 	flags := byte(0)
 	if summary {
 		flags |= FlagSummary
@@ -180,6 +180,7 @@ func EncodeState(sourceShortID uint16, summary bool, body StateBody) ([]byte, er
 	return Encode(Packet{
 		LogicalType:   TypeState,
 		Flags:         flags,
+		Sequence:      sequence,
 		SourceShortID: sourceShortID,
 		Body: []byte{
 			body.KeyToken,
@@ -200,7 +201,7 @@ func DecodeState(packet *Packet) (*StateBody, error) {
 	}, nil
 }
 
-func EncodeEvent(sourceShortID uint16, summary bool, body EventBody) ([]byte, error) {
+func EncodeEvent(sourceShortID uint16, summary bool, sequence byte, body EventBody) ([]byte, error) {
 	flags := byte(0)
 	if summary {
 		flags |= FlagSummary
@@ -208,6 +209,7 @@ func EncodeEvent(sourceShortID uint16, summary bool, body EventBody) ([]byte, er
 	return Encode(Packet{
 		LogicalType:   TypeEvent,
 		Flags:         flags,
+		Sequence:      sequence,
 		SourceShortID: sourceShortID,
 		Body: []byte{
 			body.EventCode,
@@ -230,7 +232,7 @@ func DecodeEvent(packet *Packet) (*EventBody, error) {
 	}, nil
 }
 
-func EncodeCommandResult(sourceShortID uint16, summary bool, body CommandResultBody) ([]byte, error) {
+func EncodeCommandResult(sourceShortID uint16, summary bool, sequence byte, body CommandResultBody) ([]byte, error) {
 	flags := byte(0)
 	if summary {
 		flags |= FlagSummary
@@ -242,6 +244,7 @@ func EncodeCommandResult(sourceShortID uint16, summary bool, body CommandResultB
 	return Encode(Packet{
 		LogicalType:   TypeCommandResult,
 		Flags:         flags,
+		Sequence:      sequence,
 		SourceShortID: sourceShortID,
 		Body:          payload,
 	})
@@ -258,7 +261,7 @@ func DecodeCommandResult(packet *Packet) (*CommandResultBody, error) {
 	}, nil
 }
 
-func EncodePendingDigest(sourceShortID uint16, summary bool, body PendingDigestBody) ([]byte, error) {
+func EncodePendingDigest(sourceShortID uint16, summary bool, sequence byte, body PendingDigestBody) ([]byte, error) {
 	flags := byte(0)
 	if summary {
 		flags |= FlagSummary
@@ -266,6 +269,7 @@ func EncodePendingDigest(sourceShortID uint16, summary bool, body PendingDigestB
 	return Encode(Packet{
 		LogicalType:   TypePendingDigest,
 		Flags:         flags,
+		Sequence:      sequence,
 		SourceShortID: sourceShortID,
 		Body: []byte{
 			byte(body.PendingCount),
@@ -284,9 +288,10 @@ func DecodePendingDigest(packet *Packet) (*PendingDigestBody, error) {
 	}, nil
 }
 
-func EncodeTinyPoll(sourceShortID uint16, body TinyPollBody) ([]byte, error) {
+func EncodeTinyPoll(sourceShortID uint16, sequence byte, body TinyPollBody) ([]byte, error) {
 	return Encode(Packet{
 		LogicalType:   TypeTinyPoll,
+		Sequence:      sequence,
 		SourceShortID: sourceShortID,
 		Body:          []byte{body.ServiceLevel},
 	})
@@ -299,7 +304,7 @@ func DecodeTinyPoll(packet *Packet) (*TinyPollBody, error) {
 	return &TinyPollBody{ServiceLevel: packet.Body[0]}, nil
 }
 
-func EncodeCompactCommand(targetShortID uint16, summary bool, body CompactCommandBody) ([]byte, error) {
+func EncodeCompactCommand(targetShortID uint16, summary bool, sequence byte, body CompactCommandBody) ([]byte, error) {
 	flags := byte(0)
 	if summary {
 		flags |= FlagSummary
@@ -312,6 +317,7 @@ func EncodeCompactCommand(targetShortID uint16, summary bool, body CompactComman
 	return Encode(Packet{
 		LogicalType:   TypeCompactCommand,
 		Flags:         flags,
+		Sequence:      sequence,
 		TargetShortID: targetShortID,
 		Body:          payload,
 	})
@@ -329,7 +335,7 @@ func DecodeCompactCommand(packet *Packet) (*CompactCommandBody, error) {
 	}, nil
 }
 
-func EncodeHeartbeat(sourceShortID uint16, summary bool, body HeartbeatBody) ([]byte, error) {
+func EncodeHeartbeat(sourceShortID uint16, summary bool, sequence byte, body HeartbeatBody) ([]byte, error) {
 	flags := byte(0)
 	if summary {
 		flags |= FlagSummary
@@ -337,6 +343,7 @@ func EncodeHeartbeat(sourceShortID uint16, summary bool, body HeartbeatBody) ([]
 	return Encode(Packet{
 		LogicalType:   TypeHeartbeat,
 		Flags:         flags,
+		Sequence:      sequence,
 		SourceShortID: sourceShortID,
 		Body: []byte{
 			body.Health,
