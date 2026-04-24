@@ -4,7 +4,7 @@
 LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
 
 現状は **strong alpha / pre-beta** です。`durable Site Router`、`Host Agent`、
-binary on-air v1、sleepy tiny command、gateway heartbeat ingest は動く本線として整備していますが、
+binary on-air v1、sleepy tiny command、gateway heartbeat ingest、外向き `pkg/fabric` SDK の入口は動く本線として整備していますが、
 Wi-Fi mesh backbone、LoRa relay / multi-hop、自動 hybrid route selection、本番 provisioning、
 deep sleep field deployment はまだ完成扱いではありません。
 
@@ -24,14 +24,18 @@ Current Alpha Can:
 
 - JSON event/state/command を Site Router の durable ledger / queue に ingest する
 - USB gateway heartbeat を Host Agent で `heartbeat` envelope に正規化し、durable ledger に保存する
+- gateway / node heartbeat を `subject_kind / subject_id` で一般化し、`lora_ingress` は live gateway observation として扱う
 - binary on-air v1 の `state / event / command_result / pending_digest / tiny_poll / compact_command / heartbeat` を encode/decode する
 - sleepy tiny command を short ID / command token / JP payload cap 前提で扱う
+- `pkg/fabric` から state / event / sleepy tiny command を typed entrypoint で発行する
+- `contracts/policy/` で device profile / role policy / route class の安全な初期方針を固定する
 - clean source export を生成し、Python / Go / firmware build smoke CI で主線を守る
 
 Current Alpha Cannot Yet:
 
 - Wi-Fi mesh backbone / LoRa relay / multi-hop routing を本番品質で運用する
 - app intent から bearer/path を完全自動選択する汎用 RoutePlanner として動く
+- route plan / attempt の全候補 scoring、multi-gateway ack owner、redundant settlement を完成済みとして扱う
 - battery sleepy leaf を deep sleep + RTC persistence の field deployment として保証する
 - production security key model / signed lease / anti-replay を提供する
 
@@ -45,6 +49,7 @@ Current Alpha Cannot Yet:
 - `compact-codecs.json` の frame type `3/4` は USB transport family の shape 管理で、LoRa on-air header そのものの正本ではない
 - LoRa on-air は short ID 前提の binary header / compact command token を優先する
 - `manifest / lease / role / power-class` を queue 前に反映する
+- LoRa route は explicit route class と compact/summary payload fit を通ったものだけ queue する
 - `contract -> integration -> HIL -> soak` を各フェーズで gate にする
 
 ## 実装トラック

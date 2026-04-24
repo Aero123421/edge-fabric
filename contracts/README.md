@@ -27,6 +27,12 @@
   gateway heartbeat JSON と legacy compact heartbeat shape の固定表
 - `protocol/sleepy-command-policy.json`
   sleepy leaf が通常 wake で受ける command policy
+- `policy/role-policy.json`
+  role ごとの relay / deep sleep / always-on 制約
+- `policy/route-classes.json`
+  route_class ごとの許可 bearer、payload 方針、service level
+- `policy/device-profiles.json`
+  motion / leak / powered servo など、汎用 IoT 用途の安全な初期 profile
 
 ## 利用トラック
 
@@ -52,3 +58,4 @@
 - `heartbeat-wire.json` の LoRa shape も legacy compact/reference track 用で、mainline binary on-air の heartbeat body とは分けて扱います
 - `heartbeat-wire.json` の gateway JSON shape は `status_heartbeat_v1` と `lora_ingress_v1` を併記し、gateway runtime の 2 系統を legacy/reference track として管理します
 - `sleepy-command-policy.json` は sleepy leaf command subset の正本
+- `policy/*.json` は runtime 実装を増やす前に docs / SDK / tests が共有する safety policy の正本として扱います

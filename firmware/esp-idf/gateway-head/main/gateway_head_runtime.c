@@ -183,7 +183,7 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
 }
 
 static esp_err_t gateway_handle_radio_frame(const radio_hal_frame_t *frame) {
-    char status_json[160];
+    char status_json[224];
     uint8_t frame_type;
     if (frame == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -199,7 +199,8 @@ static esp_err_t gateway_handle_radio_frame(const radio_hal_frame_t *frame) {
     snprintf(
         status_json,
         sizeof(status_json),
-        "{\"gateway_id\":\"%s\",\"status\":\"lora_ingress\",\"rssi\":%d,\"snr\":%d}",
+        "{\"gateway_id\":\"%s\",\"subject_kind\":\"gateway\",\"subject_id\":\"%s\",\"live\":true,\"status\":\"lora_ingress\",\"rssi\":%d,\"snr\":%d}",
+        s_gateway_id,
         s_gateway_id,
         (int)frame->rssi_dbm,
         (int)frame->snr_db);
@@ -207,11 +208,12 @@ static esp_err_t gateway_handle_radio_frame(const radio_hal_frame_t *frame) {
 }
 
 static esp_err_t gateway_send_heartbeat(const char *status, int extra_value) {
-    char json[160];
+    char json[224];
     snprintf(
         json,
         sizeof(json),
-        "{\"gateway_id\":\"%s\",\"live\":true,\"status\":\"%s\",\"value\":%d}",
+        "{\"gateway_id\":\"%s\",\"subject_kind\":\"gateway\",\"subject_id\":\"%s\",\"live\":true,\"status\":\"%s\",\"value\":%d}",
+        s_gateway_id,
         s_gateway_id,
         status,
         extra_value);

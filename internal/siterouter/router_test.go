@@ -61,6 +61,50 @@ func TestDuplicateEventDedupe(t *testing.T) {
 	}
 }
 
+func TestOnAirPacketKeyDedupesAcrossGatewayEventIDs(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	packetKey := "onair-v1:201:0:7:2:abcdef01"
+	first := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-onair-gw-a",
+		Kind:          "event",
+		Priority:      "critical",
+		EventID:       "evt-onair-gw-a",
+		Source:        contracts.SourceRef{HardwareID: "sleepy-onair-01"},
+		Target:        contracts.TargetRef{Kind: "service", Value: "alerts"},
+		MeshMeta:      &contracts.MeshMeta{OnAirKey: packetKey},
+		Payload:       map[string]any{"event_code": 2, "severity": 3},
+	}
+	second := *first
+	second.MessageID = "msg-onair-gw-b"
+	second.EventID = "evt-onair-gw-b"
+	ack1, err := router.Ingest(ctx, first, "gateway-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack2, err := router.Ingest(ctx, &second, "gateway-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack1.Duplicate {
+		t.Fatal("first on-air ingest must not be duplicate")
+	}
+	if !ack2.Duplicate {
+		t.Fatal("second on-air ingest must be duplicate by packet key")
+	}
+	if ack2.AckedMessageID != first.MessageID {
+		t.Fatalf("expected duplicate ack for %s, got %s", first.MessageID, ack2.AckedMessageID)
+	}
+	count, err := router.CountEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 event, got %d", count)
+	}
+}
+
 func TestQueueRecovery(t *testing.T) {
 	router := openTestRouter(t)
 	ctx := context.Background()
@@ -523,6 +567,56 @@ func TestSleepyTinyControlRequiresLeaseAndShortID(t *testing.T) {
 	if plan.Detail["target_short_id"].(int) != 204 {
 		t.Fatalf("expected target short id detail, got %+v", plan.Detail)
 	}
+	_, queueID, err := router.IssueCommand(ctx, command, "local", "command:cmd-route-sleepy-01-replanned")
+	if err != nil {
+		t.Fatalf("expected route plan to be persisted with queue item, got %v", err)
+	}
+	routeRecord, err := router.OutboxRoutePlan(ctx, queueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routeRecord == nil || routeRecord.RouteStatus != "ready_to_send" || routeRecord.SelectedBearer != "lora_direct" || routeRecord.RoutePlan == nil {
+		t.Fatalf("unexpected persisted route plan: %+v", routeRecord)
+	}
+}
+
+func TestLoRaPrimaryRequiresExplicitCompactRouteClass(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, "sleepy-default-lora", &contracts.Manifest{
+		HardwareID:          "sleepy-default-lora",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "primary_battery",
+		WakeClass:           "sleepy_event",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"sleepy_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "sleepy-default-lora", &contracts.Lease{
+		RoleLeaseID:      "lease-default-lora",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-default-lora",
+		FabricShortID:    intPtr(209),
+		EffectiveRole:    "sleepy_leaf",
+		PrimaryBearer:    "lora",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	command := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-command-default-lora",
+		Kind:          "command",
+		Priority:      "control",
+		CommandID:     "cmd-default-lora",
+		Source:        contracts.SourceRef{HardwareID: "controller-default-lora"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "sleepy-default-lora"},
+		Payload:       map[string]any{"command_name": "relay.set", "raw": map[string]any{"too": "rich"}},
+	}
+	if _, err := router.EnqueueOutbound(ctx, command, ""); err == nil {
+		t.Fatal("expected implicit rich LoRa route to be rejected")
+	}
 }
 
 func TestUnsupportedRouteClassIsRejected(t *testing.T) {
@@ -542,6 +636,33 @@ func TestUnsupportedRouteClassIsRejected(t *testing.T) {
 	}
 	if _, err := router.EnqueueOutbound(ctx, command, ""); err == nil {
 		t.Fatal("expected unsupported route_class to be rejected")
+	}
+}
+
+func TestLeasePrimaryBearerMustMatchManifest(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, "bearer-guard-01", &contracts.Manifest{
+		HardwareID:          "bearer-guard-01",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "mains",
+		WakeClass:           "always_on",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"powered_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := router.UpsertLease(ctx, "bearer-guard-01", &contracts.Lease{
+		RoleLeaseID:      "lease-bearer-bad",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-bearer-bad",
+		FabricShortID:    intPtr(211),
+		EffectiveRole:    "powered_leaf",
+		PrimaryBearer:    "wifi_ip",
+	})
+	if err == nil {
+		t.Fatal("expected unsupported primary_bearer to be rejected")
 	}
 }
 
@@ -652,7 +773,7 @@ func TestHeartbeatSummaryAndFileChunkSemantics(t *testing.T) {
 		Delivery: &contracts.DeliverySpec{
 			IngressMeta: map[string]any{"host_link": "usb_cdc", "bearer": "lora_direct"},
 		},
-		Payload: map[string]any{"gateway_id": "gw-alpha", "live": true, "status": "lora_ingress"},
+		Payload: map[string]any{"gateway_id": "gw-alpha", "status": "lora_ingress"},
 	}
 	if _, err := router.Ingest(ctx, heartbeat, "usb-gw-alpha"); err != nil {
 		t.Fatal(err)
@@ -661,7 +782,7 @@ func TestHeartbeatSummaryAndFileChunkSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record == nil || record.GatewayID != "gw-alpha" || !record.Live || record.HostLink != "usb_cdc" || record.Bearer != "lora_direct" {
+	if record == nil || record.GatewayID != "gw-alpha" || record.SubjectKind != "gateway" || record.SubjectID != "gw-alpha" || !record.Live || record.HostLink != "usb_cdc" || record.Bearer != "lora_direct" {
 		t.Fatalf("unexpected heartbeat record: %+v", record)
 	}
 
@@ -711,6 +832,30 @@ func TestHeartbeatSummaryAndFileChunkSemantics(t *testing.T) {
 	}
 	if progress == nil || progress.ReceivedChunks != 3 || !progress.Complete {
 		t.Fatalf("unexpected file chunk progress: %+v", progress)
+	}
+}
+
+func TestFileChunkTotalMismatchIsRejected(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	first := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-file-mismatch-01",
+		Kind:          "file_chunk",
+		Priority:      "bulk",
+		CorrelationID: "file-mismatch-01",
+		Source:        contracts.SourceRef{HardwareID: "controller-ota"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "sleepy-ota-02"},
+		Payload:       map[string]any{"file_id": "file-mismatch-01", "chunk_index": 0, "total_chunks": 3},
+	}
+	if _, err := router.Ingest(ctx, first, "ota-host"); err != nil {
+		t.Fatal(err)
+	}
+	second := *first
+	second.MessageID = "msg-file-mismatch-02"
+	second.Payload = map[string]any{"file_id": "file-mismatch-01", "chunk_index": 1, "total_chunks": 4}
+	if _, err := router.Ingest(ctx, &second, "ota-host"); err == nil {
+		t.Fatal("expected mismatched total_chunks to be rejected")
 	}
 }
 

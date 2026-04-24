@@ -1,0 +1,40 @@
+{
+  "version": "1.0.0",
+  "route_classes": {
+    "sleepy_tiny_control": {
+      "allowed_bearers": ["lora_direct"],
+      "requires_target_role": ["sleepy_leaf"],
+      "max_lora_body_bytes": 16,
+      "allow_relay": false,
+      "service_level": "eventual_next_poll",
+      "pending_policy": "newest_wins"
+    },
+    "maintenance_sync": {
+      "allowed_bearers": ["ble_maintenance"],
+      "requires_target_role": ["sleepy_leaf"],
+      "allow_relay": false,
+      "service_level": "maintenance_window"
+    },
+    "critical_alert": {
+      "allowed_bearers": ["wifi", "wifi_ip", "lora_direct"],
+      "allow_redundant": true,
+      "max_lora_body_bytes": 12,
+      "service_level": "best_effort_urgent"
+    },
+    "sparse_summary": {
+      "allowed_bearers": ["lora_direct", "wifi", "wifi_ip"],
+      "allow_redundant": false,
+      "service_level": "eventual_summary"
+    },
+    "bulk_wifi_only": {
+      "allowed_bearers": ["wifi", "wifi_ip", "wifi_mesh"],
+      "forbidden_bearers": ["lora", "lora_direct", "lora_relay"],
+      "service_level": "bulk_maintenance"
+    },
+    "local_control": {
+      "allowed_bearers": ["wifi", "wifi_ip", "usb_cdc"],
+      "forbidden_bearers": ["lora", "lora_direct"],
+      "service_level": "low_latency_local"
+    }
+  }
+}

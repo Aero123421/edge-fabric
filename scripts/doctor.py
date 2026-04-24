@@ -31,9 +31,12 @@ def optional_tool_version(
     executable = shutil.which(command[0])
     if executable is None:
         return "missing"
+    run_command = [executable, *command[1:]]
+    if Path(executable).suffix.lower() == ".py":
+        run_command = [sys.executable, executable, *command[1:]]
     try:
         result = subprocess.run(
-            [executable, *command[1:]],
+            run_command,
             capture_output=True,
             text=True,
             check=False,

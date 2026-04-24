@@ -7,12 +7,17 @@
   "gateway_json_shapes": {
     "status_heartbeat_v1": [
       "gateway_id",
+      "subject_kind",
+      "subject_id",
       "live",
       "status",
       "value"
     ],
     "lora_ingress_v1": [
       "gateway_id",
+      "subject_kind",
+      "subject_id",
+      "live",
       "status",
       "rssi",
       "snr"

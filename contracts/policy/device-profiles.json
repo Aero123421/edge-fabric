@@ -1,0 +1,52 @@
+{
+  "version": "1.0.0",
+  "profiles": {
+    "motion_sensor_battery_v1": {
+      "power_class": "primary_battery",
+      "wake_class": "sleepy_event",
+      "allowed_roles": ["sleepy_leaf"],
+      "supported_bearers": ["lora", "ble_maintenance"],
+      "default_routes": {
+        "event": "critical_alert",
+        "state": "sparse_summary",
+        "heartbeat": "sleepy_heartbeat"
+      },
+      "forbidden": {
+        "relay": true,
+        "wifi_mesh_router": true,
+        "bulk": true
+      }
+    },
+    "leak_sensor_sleepy_v1": {
+      "power_class": "primary_battery",
+      "wake_class": "sleepy_event",
+      "allowed_roles": ["sleepy_leaf"],
+      "supported_bearers": ["lora", "ble_maintenance"],
+      "default_routes": {
+        "event": "critical_alert",
+        "state": "sparse_summary",
+        "heartbeat": "sleepy_heartbeat"
+      },
+      "forbidden": {
+        "relay": true,
+        "wifi_mesh_router": true,
+        "bulk": true
+      }
+    },
+    "servo_controller_powered_v1": {
+      "power_class": "mains_powered",
+      "wake_class": "always_on",
+      "allowed_roles": ["powered_leaf"],
+      "supported_bearers": ["wifi"],
+      "default_routes": {
+        "command": "local_control",
+        "state": "normal_state",
+        "event": "control_event"
+      },
+      "forbidden": {
+        "lora_realtime_control": true,
+        "deep_sleep": true
+      }
+    }
+  }
+}

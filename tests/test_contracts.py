@@ -338,16 +338,29 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(artifact["usb_frame_type"], 2)
         self.assertEqual(
             artifact["gateway_json_shapes"]["status_heartbeat_v1"],
-            ["gateway_id", "live", "status", "value"],
+            ["gateway_id", "subject_kind", "subject_id", "live", "status", "value"],
         )
         self.assertEqual(
             artifact["gateway_json_shapes"]["lora_ingress_v1"],
-            ["gateway_id", "status", "rssi", "snr"],
+            ["gateway_id", "subject_kind", "subject_id", "live", "status", "rssi", "snr"],
         )
         self.assertIn("lora_ingress", firmware_source)
         self.assertIn("rssi", firmware_source)
         self.assertIn("snr", firmware_source)
         self.assertEqual(shape_for("H", 4), artifact["lora_compact_shapes"]["4"])
+
+    def test_policy_artifacts_capture_safe_defaults(self) -> None:
+        roles = self._load_json("contracts/policy/role-policy.json")
+        routes = self._load_json("contracts/policy/route-classes.json")
+        profiles = self._load_json("contracts/policy/device-profiles.json")
+        self.assertFalse(roles["roles"]["sleepy_leaf"]["may_relay"])
+        self.assertFalse(roles["roles"]["sleepy_leaf"]["requires_always_on"])
+        sleepy_route = routes["route_classes"]["sleepy_tiny_control"]
+        self.assertEqual(sleepy_route["allowed_bearers"], ["lora_direct"])
+        self.assertFalse(sleepy_route["allow_relay"])
+        motion = profiles["profiles"]["motion_sensor_battery_v1"]
+        self.assertEqual(motion["allowed_roles"], ["sleepy_leaf"])
+        self.assertTrue(motion["forbidden"]["relay"])
 
 
 if __name__ == "__main__":

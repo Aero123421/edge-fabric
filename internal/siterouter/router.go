@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,6 +56,8 @@ type PendingCommand struct {
 type HeartbeatRecord struct {
 	HeartbeatKey     string         `json:"heartbeat_key"`
 	GatewayID        string         `json:"gateway_id,omitempty"`
+	SubjectKind      string         `json:"subject_kind,omitempty"`
+	SubjectID        string         `json:"subject_id,omitempty"`
 	SourceHardwareID string         `json:"source_hardware_id"`
 	IngressID        string         `json:"ingress_id"`
 	HostLink         string         `json:"host_link,omitempty"`
@@ -108,6 +111,17 @@ type RoutePlan struct {
 	PayloadFit     bool           `json:"payload_fit"`
 	Reason         string         `json:"reason"`
 	Detail         map[string]any `json:"detail,omitempty"`
+}
+
+type OutboxRoutePlanRecord struct {
+	QueueID           int64          `json:"queue_id"`
+	RouteStatus       string         `json:"route_status"`
+	SelectedBearer    string         `json:"selected_bearer,omitempty"`
+	SelectedGatewayID string         `json:"selected_gateway_id,omitempty"`
+	RouteReason       string         `json:"route_reason,omitempty"`
+	PayloadFit        bool           `json:"payload_fit"`
+	RoutePlan         *RoutePlan     `json:"route_plan,omitempty"`
+	Detail            map[string]any `json:"detail,omitempty"`
 }
 
 type NodeRuntimeInfo struct {
@@ -207,6 +221,17 @@ func (r *Router) init(ctx context.Context) error {
 			source_hardware_id TEXT NOT NULL,
 			envelope_json TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS radio_packet_observation (
+			packet_key TEXT PRIMARY KEY,
+			event_id TEXT NOT NULL,
+			first_message_id TEXT NOT NULL,
+			last_message_id TEXT NOT NULL,
+			source_hardware_id TEXT NOT NULL,
+			last_ingress_id TEXT NOT NULL,
+			observed_count INTEGER NOT NULL DEFAULT 1,
+			first_seen_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS latest_state (
 			source_hardware_id TEXT NOT NULL,
 			state_key TEXT NOT NULL,
@@ -244,6 +269,12 @@ func (r *Router) init(ctx context.Context) error {
 			priority TEXT NOT NULL,
 			envelope_json TEXT NOT NULL,
 			status TEXT NOT NULL,
+			route_status TEXT NOT NULL DEFAULT 'route_pending',
+			selected_bearer TEXT,
+			selected_gateway_id TEXT,
+			route_reason TEXT,
+			payload_fit INTEGER NOT NULL DEFAULT 0,
+			route_plan_json TEXT,
 			lease_owner TEXT,
 			lease_until TEXT,
 			retry_count INTEGER NOT NULL DEFAULT 0,
@@ -275,6 +306,8 @@ func (r *Router) init(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS heartbeat_ledger (
 			heartbeat_key TEXT PRIMARY KEY,
 			gateway_id TEXT,
+			subject_kind TEXT,
+			subject_id TEXT,
 			source_hardware_id TEXT NOT NULL,
 			ingress_id TEXT NOT NULL,
 			host_link TEXT,
@@ -322,16 +355,29 @@ func (r *Router) init(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := r.ensureCommandLedgerSchema(ctx); err != nil {
+	if err := r.ensureOperationalSchema(ctx); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (r *Router) ensureCommandLedgerSchema(ctx context.Context) error {
-	if _, err := r.db.ExecContext(ctx, `ALTER TABLE command_ledger ADD COLUMN command_token_scope TEXT NOT NULL DEFAULT ''`); err != nil {
-		lower := strings.ToLower(err.Error())
-		if !strings.Contains(lower, "duplicate column") {
+func (r *Router) ensureOperationalSchema(ctx context.Context) error {
+	columns := []struct {
+		table string
+		def   string
+	}{
+		{"command_ledger", `command_token_scope TEXT NOT NULL DEFAULT ''`},
+		{"heartbeat_ledger", `subject_kind TEXT`},
+		{"heartbeat_ledger", `subject_id TEXT`},
+		{"outbox_queue", `route_status TEXT NOT NULL DEFAULT 'route_pending'`},
+		{"outbox_queue", `selected_bearer TEXT`},
+		{"outbox_queue", `selected_gateway_id TEXT`},
+		{"outbox_queue", `route_reason TEXT`},
+		{"outbox_queue", `payload_fit INTEGER NOT NULL DEFAULT 0`},
+		{"outbox_queue", `route_plan_json TEXT`},
+	}
+	for _, column := range columns {
+		if err := r.addColumnIfMissing(ctx, column.table, column.def); err != nil {
 			return err
 		}
 	}
@@ -355,6 +401,16 @@ func (r *Router) ensureCommandLedgerSchema(ctx context.Context) error {
 	return err
 }
 
+func (r *Router) addColumnIfMissing(ctx context.Context, table, definition string) error {
+	if _, err := r.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s`, table, definition)); err != nil {
+		lower := strings.ToLower(err.Error())
+		if !strings.Contains(lower, "duplicate column") {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingressID string) (*PersistAck, error) {
 	if err := envelope.Validate(); err != nil {
 		return nil, err
@@ -371,6 +427,14 @@ func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingre
 	}
 	if duplicate != "" {
 		return &PersistAck{AckedMessageID: duplicate, Status: "duplicate", Duplicate: true}, nil
+	}
+	if packetDuplicate, err := r.recordDuplicateRadioObservation(ctx, tx, envelope, ingressID); err != nil {
+		return nil, err
+	} else if packetDuplicate != "" {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return &PersistAck{AckedMessageID: packetDuplicate, Status: "duplicate", Duplicate: true}, nil
 	}
 
 	rawEnvelope, err := json.Marshal(envelope)
@@ -407,6 +471,9 @@ func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingre
 				}
 				return nil, err
 			}
+		}
+		if err := r.recordRadioObservation(ctx, tx, envelope, ingressID, persistedAt); err != nil {
+			return nil, err
 		}
 	case "state":
 		if err := r.upsertLatestState(ctx, tx, envelope); err != nil {
@@ -505,6 +572,53 @@ func (r *Router) lookupDuplicate(ctx context.Context, tx *sql.Tx, envelope *cont
 	return "", err
 }
 
+func (r *Router) recordDuplicateRadioObservation(ctx context.Context, tx *sql.Tx, envelope *contracts.Envelope, ingressID string) (string, error) {
+	packetKey := envelopeOnAirKey(envelope)
+	if envelope.Kind != "event" || packetKey == "" {
+		return "", nil
+	}
+	var duplicate string
+	err := tx.QueryRowContext(ctx, `SELECT first_message_id FROM radio_packet_observation WHERE packet_key = ?`, packetKey).Scan(&duplicate)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE radio_packet_observation
+		SET last_message_id = ?, last_ingress_id = ?, observed_count = observed_count + 1, last_seen_at = ?
+		WHERE packet_key = ?
+	`, envelope.MessageID, ingressID, now, packetKey); err != nil {
+		return "", err
+	}
+	return duplicate, nil
+}
+
+func (r *Router) recordRadioObservation(ctx context.Context, tx *sql.Tx, envelope *contracts.Envelope, ingressID, observedAt string) error {
+	packetKey := envelopeOnAirKey(envelope)
+	if envelope.Kind != "event" || packetKey == "" {
+		return nil
+	}
+	eventID := envelope.EventID
+	if eventID == "" {
+		eventID = envelope.MessageID
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO radio_packet_observation (
+			packet_key, event_id, first_message_id, last_message_id, source_hardware_id,
+			last_ingress_id, observed_count, first_seen_at, last_seen_at
+		) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT(packet_key) DO UPDATE SET
+			last_message_id = excluded.last_message_id,
+			last_ingress_id = excluded.last_ingress_id,
+			observed_count = observed_count + 1,
+			last_seen_at = excluded.last_seen_at
+	`, packetKey, eventID, envelope.MessageID, envelope.MessageID, envelope.Source.HardwareID, ingressID, observedAt, observedAt)
+	return err
+}
+
 func (r *Router) upsertLatestState(ctx context.Context, tx *sql.Tx, envelope *contracts.Envelope) error {
 	stateKey := "__default__"
 	if value, ok := envelope.Payload["state_key"].(string); ok && value != "" {
@@ -573,6 +687,34 @@ func compareStateOrder(envelope *contracts.Envelope, occurredAt, sessionID strin
 		return 1
 	}
 	if envelope.MessageID < messageID {
+		return -1
+	}
+	return 0
+}
+
+func compareStateOrderWithOccurred(left *contracts.Envelope, leftOccurredAt string, right *contracts.Envelope, rightOccurredAt string) int {
+	leftOccurred := mustParseOrderTime(leftOccurredAt)
+	rightOccurred := mustParseOrderTime(rightOccurredAt)
+	if leftOccurred.After(rightOccurred) {
+		return 1
+	}
+	if leftOccurred.Before(rightOccurred) {
+		return -1
+	}
+	if left.Source.SessionID != "" && right.Source.SessionID != "" && left.Source.SessionID == right.Source.SessionID {
+		leftSeq := derefInt(left.Source.SeqLocal)
+		rightSeq := derefInt(right.Source.SeqLocal)
+		if leftSeq > rightSeq {
+			return 1
+		}
+		if leftSeq < rightSeq {
+			return -1
+		}
+	}
+	if left.MessageID > right.MessageID {
+		return 1
+	}
+	if left.MessageID < right.MessageID {
 		return -1
 	}
 	return 0
@@ -688,16 +830,22 @@ func (r *Router) upsertHeartbeatEnvelope(
 	updatedAt string,
 ) error {
 	heartbeatKey := heartbeatKeyForEnvelope(envelope)
+	subjectKind := heartbeatSubjectKind(envelope)
+	subjectID := heartbeatSubjectID(envelope)
+	status := payloadString(envelope.Payload, "status")
+	live := payloadBool(envelope.Payload, "live") || heartbeatStatusImpliesLive(status)
 	payloadJSON, err := json.Marshal(envelope.Payload)
 	if err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO heartbeat_ledger (
-			heartbeat_key, gateway_id, source_hardware_id, ingress_id, host_link, bearer, status, live, message_id, payload_json, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			heartbeat_key, gateway_id, subject_kind, subject_id, source_hardware_id, ingress_id, host_link, bearer, status, live, message_id, payload_json, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(heartbeat_key) DO UPDATE SET
 			gateway_id = excluded.gateway_id,
+			subject_kind = excluded.subject_kind,
+			subject_id = excluded.subject_id,
 			source_hardware_id = excluded.source_hardware_id,
 			ingress_id = excluded.ingress_id,
 			host_link = excluded.host_link,
@@ -710,12 +858,14 @@ func (r *Router) upsertHeartbeatEnvelope(
 	`,
 		heartbeatKey,
 		payloadString(envelope.Payload, "gateway_id"),
+		subjectKind,
+		subjectID,
 		envelope.Source.HardwareID,
 		ingressID,
 		deliveryIngressValue(envelope.Delivery, "host_link"),
 		deliveryIngressValue(envelope.Delivery, "bearer"),
-		payloadString(envelope.Payload, "status"),
-		boolToInt(payloadBool(envelope.Payload, "live")),
+		status,
+		boolToInt(live),
 		envelope.MessageID,
 		string(payloadJSON),
 		updatedAt,
@@ -748,6 +898,18 @@ func (r *Router) upsertFileChunkEnvelope(ctx context.Context, tx *sql.Tx, envelo
 	totalChunks := payloadInt64(envelope.Payload, "total_chunks")
 	if chunkIndex == nil || totalChunks == nil {
 		return contracts.NewValidationError("file_chunk requires payload.chunk_index and payload.total_chunks")
+	}
+	var existingTotal int
+	err := tx.QueryRowContext(ctx, `
+		SELECT total_chunks FROM file_chunk_ledger
+		WHERE file_id = ?
+		LIMIT 1
+	`, fileID).Scan(&existingTotal)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil && existingTotal != int(*totalChunks) {
+		return contracts.NewValidationError("file_chunk total_chunks mismatch for file_id %s: existing=%d incoming=%d", fileID, existingTotal, *totalChunks)
 	}
 	payloadJSON, err := json.Marshal(envelope.Payload)
 	if err != nil {
@@ -833,23 +995,16 @@ func (r *Router) RebuildLatestState(ctx context.Context) error {
 }
 
 func sortStateCandidates(items []stateCandidate) {
-	for i := 0; i < len(items); i++ {
-		for j := i + 1; j < len(items); j++ {
-			left := items[i]
-			right := items[j]
-			leftOccurred := left.Envelope.OccurredAt
-			if leftOccurred == "" {
-				leftOccurred = left.PersistedAt
-			}
-			rightOccurred := right.Envelope.OccurredAt
-			if rightOccurred == "" {
-				rightOccurred = right.PersistedAt
-			}
-			if compareStateOrder(&left.Envelope, rightOccurred, right.Envelope.Source.SessionID, derefInt(right.Envelope.Source.SeqLocal), right.Envelope.MessageID) > 0 {
-				items[i], items[j] = items[j], items[i]
-			}
-		}
-	}
+	sort.SliceStable(items, func(i, j int) bool {
+		left := items[i]
+		right := items[j]
+		return compareStateOrderWithOccurred(
+			&left.Envelope,
+			stateCandidateOccurredAt(left),
+			&right.Envelope,
+			stateCandidateOccurredAt(right),
+		) < 0
+	})
 }
 
 func (r *Router) CommandState(ctx context.Context, commandID string) (string, error) {
@@ -1023,6 +1178,11 @@ func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Enve
 		plan.Bearer = bearerLabel(info.Lease)
 		plan.PathLabel = "lease_primary"
 		plan.Reason = "lease_primary_bearer"
+		if bearerIsLoRa(plan.Bearer) {
+			plan.PayloadFit = false
+			plan.Reason = "lora_requires_explicit_route_class"
+			return nil, contracts.NewValidationError("LoRa target %s requires explicit compact/summary route_class before enqueue", envelope.Target.Value)
+		}
 		return plan, nil
 	}
 	switch plan.RouteClass {
@@ -1063,8 +1223,24 @@ func (r *Router) EnqueueOutbound(ctx context.Context, envelope *contracts.Envelo
 	if err := envelope.Validate(); err != nil {
 		return 0, err
 	}
-	if err := r.validateOutboundEnvelope(ctx, envelope); err != nil {
+	plan, err := r.PlanOutboundRoute(ctx, envelope)
+	if err != nil {
 		return 0, err
+	}
+	routePlanJSON, err := json.Marshal(plan)
+	if err != nil {
+		return 0, err
+	}
+	routeStatus := routeStatusForPlan(plan)
+	selectedBearer := ""
+	selectedGatewayID := ""
+	routeReason := ""
+	payloadFit := false
+	if plan != nil {
+		selectedBearer = plan.Bearer
+		selectedGatewayID = plan.GatewayID
+		routeReason = plan.Reason
+		payloadFit = plan.PayloadFit
 	}
 	if queueKey == "" {
 		queueKey = "message:" + envelope.MessageID
@@ -1077,11 +1253,13 @@ func (r *Router) EnqueueOutbound(ctx context.Context, envelope *contracts.Envelo
 	result, err := r.db.ExecContext(ctx, `
 		INSERT INTO outbox_queue (
 			queue_key, message_id, target_kind, target_value, priority, envelope_json,
-			status, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+			status, route_status, selected_bearer, selected_gateway_id, route_reason, payload_fit,
+			route_plan_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(queue_key) DO NOTHING
 	`, queueKey, envelope.MessageID, envelope.Target.Kind, envelope.Target.Value,
-		envelope.Priority, string(raw), now, now)
+		envelope.Priority, string(raw), routeStatus, selectedBearer, selectedGatewayID, routeReason,
+		boolToInt(payloadFit), string(routePlanJSON), now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -1094,6 +1272,47 @@ func (r *Router) EnqueueOutbound(ctx context.Context, envelope *contracts.Envelo
 		return id, nil
 	}
 	return result.LastInsertId()
+}
+
+func (r *Router) OutboxRoutePlan(ctx context.Context, queueID int64) (*OutboxRoutePlanRecord, error) {
+	var (
+		routeStatus       string
+		selectedBearer    string
+		selectedGatewayID string
+		routeReason       string
+		payloadFit        int
+		routePlanJSON     string
+	)
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(route_status, ''), COALESCE(selected_bearer, ''), COALESCE(selected_gateway_id, ''),
+			COALESCE(route_reason, ''), payload_fit, COALESCE(route_plan_json, '')
+		FROM outbox_queue
+		WHERE id = ?
+	`, queueID).Scan(&routeStatus, &selectedBearer, &selectedGatewayID, &routeReason, &payloadFit, &routePlanJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	record := &OutboxRoutePlanRecord{
+		QueueID:           queueID,
+		RouteStatus:       routeStatus,
+		SelectedBearer:    selectedBearer,
+		SelectedGatewayID: selectedGatewayID,
+		RouteReason:       routeReason,
+		PayloadFit:        payloadFit != 0,
+		Detail:            map[string]any{},
+	}
+	if routePlanJSON != "" {
+		var plan RoutePlan
+		if err := json.Unmarshal([]byte(routePlanJSON), &plan); err != nil {
+			return nil, err
+		}
+		record.RoutePlan = &plan
+		record.Detail = plan.Detail
+	}
+	return record, nil
 }
 
 func (r *Router) LeaseOutbound(ctx context.Context, workerID string, limit int, leaseDuration time.Duration) ([]QueueLease, error) {
@@ -1356,22 +1575,26 @@ func (r *Router) PendingCommandsForNode(ctx context.Context, targetHardwareID st
 
 func (r *Router) LatestHeartbeat(ctx context.Context, heartbeatKey string) (*HeartbeatRecord, error) {
 	var (
-		gatewayID string
-		sourceID  string
-		ingressID string
-		hostLink  string
-		bearer    string
-		status    string
-		live      int
-		messageID string
-		payload   string
-		updatedAt string
+		gatewayID   string
+		subjectKind string
+		subjectID   string
+		sourceID    string
+		ingressID   string
+		hostLink    string
+		bearer      string
+		status      string
+		live        int
+		messageID   string
+		payload     string
+		updatedAt   string
 	)
 	err := r.db.QueryRowContext(ctx, `
-		SELECT gateway_id, source_hardware_id, ingress_id, COALESCE(host_link, ''), COALESCE(bearer, ''), COALESCE(status, ''), live, message_id, payload_json, updated_at
+		SELECT COALESCE(gateway_id, ''), COALESCE(subject_kind, ''), COALESCE(subject_id, ''),
+			source_hardware_id, ingress_id, COALESCE(host_link, ''), COALESCE(bearer, ''),
+			COALESCE(status, ''), live, message_id, payload_json, updated_at
 		FROM heartbeat_ledger
 		WHERE heartbeat_key = ?
-	`, heartbeatKey).Scan(&gatewayID, &sourceID, &ingressID, &hostLink, &bearer, &status, &live, &messageID, &payload, &updatedAt)
+	`, heartbeatKey).Scan(&gatewayID, &subjectKind, &subjectID, &sourceID, &ingressID, &hostLink, &bearer, &status, &live, &messageID, &payload, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1385,6 +1608,8 @@ func (r *Router) LatestHeartbeat(ctx context.Context, heartbeatKey string) (*Hea
 	return &HeartbeatRecord{
 		HeartbeatKey:     heartbeatKey,
 		GatewayID:        gatewayID,
+		SubjectKind:      subjectKind,
+		SubjectID:        subjectID,
 		SourceHardwareID: sourceID,
 		IngressID:        ingressID,
 		HostLink:         hostLink,
@@ -1659,6 +1884,12 @@ func validateLeaseAgainstManifest(lease *contracts.Lease, manifest *contracts.Ma
 	if len(manifest.AllowedNetworkRoles) > 0 && !containsString(manifest.AllowedNetworkRoles, lease.EffectiveRole) {
 		return contracts.NewValidationError("lease role %s is not allowed for hardware_id %s", lease.EffectiveRole, manifest.HardwareID)
 	}
+	if lease.PrimaryBearer != "" && !manifestAllowsBearer(manifest, manifestBearerName(lease.PrimaryBearer)) {
+		return contracts.NewValidationError("lease primary_bearer %s is not supported by hardware_id %s", lease.PrimaryBearer, manifest.HardwareID)
+	}
+	if lease.FallbackBearer != "" && !manifestAllowsBearer(manifest, manifestBearerName(lease.FallbackBearer)) {
+		return contracts.NewValidationError("lease fallback_bearer %s is not supported by hardware_id %s", lease.FallbackBearer, manifest.HardwareID)
+	}
 	if isSleepyPowerClass(manifest) && leaseRoleRequiresAlwaysOn(lease.EffectiveRole) {
 		return contracts.NewValidationError("sleepy/battery node %s must not take always-on role %s", manifest.HardwareID, lease.EffectiveRole)
 	}
@@ -1845,6 +2076,20 @@ func bearerLabel(lease *contracts.Lease) string {
 	}
 }
 
+func bearerIsLoRa(bearer string) bool {
+	return bearer == "lora" || strings.HasPrefix(bearer, "lora_")
+}
+
+func routeStatusForPlan(plan *RoutePlan) string {
+	if plan == nil || plan.Bearer == "" || plan.Bearer == "unplanned" {
+		return "route_pending"
+	}
+	if !plan.PayloadFit {
+		return "route_blocked"
+	}
+	return "ready_to_send"
+}
+
 func payloadString(payload map[string]any, key string) string {
 	if payload == nil {
 		return ""
@@ -1859,6 +2104,16 @@ func payloadBool(payload map[string]any, key string) bool {
 	}
 	value, _ := payload[key].(bool)
 	return value
+}
+
+func envelopeOnAirKey(envelope *contracts.Envelope) string {
+	if envelope == nil {
+		return ""
+	}
+	if envelope.MeshMeta != nil && envelope.MeshMeta.OnAirKey != "" {
+		return envelope.MeshMeta.OnAirKey
+	}
+	return payloadString(envelope.Payload, "onair_key")
 }
 
 func boolToInt(value bool) int {
@@ -1880,11 +2135,53 @@ func cloneMap(value map[string]any) map[string]any {
 }
 
 func heartbeatKeyForEnvelope(envelope *contracts.Envelope) string {
+	subjectID := payloadString(envelope.Payload, "subject_id")
+	if subjectID != "" {
+		return subjectID
+	}
 	gatewayID := payloadString(envelope.Payload, "gateway_id")
 	if gatewayID != "" {
 		return gatewayID
 	}
 	return envelope.Source.HardwareID
+}
+
+func heartbeatSubjectID(envelope *contracts.Envelope) string {
+	if subjectID := payloadString(envelope.Payload, "subject_id"); subjectID != "" {
+		return subjectID
+	}
+	if gatewayID := payloadString(envelope.Payload, "gateway_id"); gatewayID != "" {
+		return gatewayID
+	}
+	if nodeID := payloadString(envelope.Payload, "node_id"); nodeID != "" {
+		return nodeID
+	}
+	return envelope.Source.HardwareID
+}
+
+func heartbeatSubjectKind(envelope *contracts.Envelope) string {
+	if subjectKind := payloadString(envelope.Payload, "subject_kind"); subjectKind != "" {
+		return subjectKind
+	}
+	if payloadString(envelope.Payload, "gateway_id") != "" {
+		return "gateway"
+	}
+	status := payloadString(envelope.Payload, "status")
+	switch status {
+	case "lora_ingress", "live", "radio_tx_queued", "hop_buffered", "radio_handoff_accepted":
+		return "gateway"
+	default:
+		return "node"
+	}
+}
+
+func heartbeatStatusImpliesLive(status string) bool {
+	switch status {
+	case "live", "lora_ingress", "radio_tx_queued", "hop_buffered", "radio_handoff_accepted", "onair_heartbeat", "sleepy_heartbeat":
+		return true
+	default:
+		return false
+	}
 }
 
 func fabricSummaryKeyForEnvelope(envelope *contracts.Envelope) string {
@@ -1908,6 +2205,13 @@ func fileChunkIDForEnvelope(envelope *contracts.Envelope) string {
 		return envelope.CorrelationID
 	}
 	return envelope.Source.HardwareID + ":" + envelope.Target.Value
+}
+
+func stateCandidateOccurredAt(candidate stateCandidate) string {
+	if candidate.Envelope.OccurredAt != "" {
+		return candidate.Envelope.OccurredAt
+	}
+	return candidate.PersistedAt
 }
 
 func deliveryIngressValue(delivery *contracts.DeliverySpec, key string) string {
@@ -1953,6 +2257,17 @@ func manifestAllowsBearer(manifest *contracts.Manifest, bearer string) bool {
 		return false
 	}
 	return containsString(manifest.SupportedBearers, bearer)
+}
+
+func manifestBearerName(bearer string) string {
+	switch bearer {
+	case "lora_direct", "lora_relay", "lora_mesh":
+		return "lora"
+	case "wifi_ip", "wifi_mesh", "wifi_lr":
+		return "wifi"
+	default:
+		return bearer
+	}
 }
 
 func isSleepyPowerClass(manifest *contracts.Manifest) bool {

@@ -5,4 +5,6 @@
 - `contracts`
   envelope / manifest / lease 型と validation
 - `sdk`
-  route-insensitive な app-facing client API
+  low-level client API と local Site Router entrypoint
+- `fabric`
+  外部アプリ向けの typed SDK entrypoint。`PublishState`, `EmitEvent`, sleepy tiny command builder, device profile registration を提供します
