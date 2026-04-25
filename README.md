@@ -1,80 +1,94 @@
 # edge-fabric
 
-この repo は、`ESP32-S3 + SX1262` を前提にした
-LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
+`edge-fabric` は、ESP32-S3 + SX1262 デバイスを LoRa と Wi-Fi の両方で扱うための **hybrid IoT fabric SDK / framework** です。
 
-現状は **strong alpha / pre-beta** です。`durable Site Router`、`Host Agent`、
-binary on-air v1、sleepy tiny command、gateway heartbeat ingest、外向き `pkg/fabric` SDK の入口、policy artifact 連動 RoutePlanner は動く本線として整備していますが、
-Wi-Fi mesh backbone、LoRa relay / multi-hop、自動 hybrid route selection、本番 provisioning、
-deep sleep field deployment はまだ完成扱いではありません。
+アプリ開発者は transport を直接選ばず、`state`、`event`、`command`、`heartbeat`、`device profile` を発行します。Site Router が durable ledger / queue / route policy を管理し、Host Agent と ESP-IDF firmware が USB gateway、LoRa on-air frame、sleepy node の実行パスをつなぎます。
 
-この project は raw LoRa-style `SX1262` link と custom fabric protocol を使います。
-**LoRaWAN stack ではなく、LoRaWAN concentrator の代替でもありません。**
+> Status: **strong alpha / pre-beta**<br>
+> Core protocol、Site Router、Host Agent、`pkg/fabric` SDK、policy-driven RoutePlanner、sleepy tiny command、gateway/node heartbeat は実装済みです。実機 HIL、production key model、完全な Wi-Fi mesh / LoRa multi-hop data plane はまだ release gate 前です。
 
-このルート repo では、次の 2 つを明確に分けます。
+## What It Does
 
-- `edge-fabric-esp32sx1262-v3-mesh/`
-  仕様・ADR・計算資料の参照元
-- ルート直下の `contracts/`, `src/`, `host/`, `sdk/`, `firmware/`, `tests/`
-  実装本体
-
-## 現在の実装方針
-
-Current Alpha Can:
-
-- JSON event/state/command を Site Router の durable ledger / queue に ingest する
-- USB gateway heartbeat を Host Agent で `heartbeat` envelope に正規化し、durable ledger に保存する
-- gateway / node heartbeat を `subject_kind / subject_id` で一般化し、`lora_ingress` は live gateway observation として扱う
-- binary on-air v1 の `state / event / command_result / pending_digest / tiny_poll / compact_command / heartbeat` を encode/decode する
-- sleepy tiny command を short ID / command token / JP payload cap 前提で扱う
-- `pkg/fabric` から state / event / sleepy tiny command を typed entrypoint で発行し、EventID / DeviceProfile 登録 option / SendResult を扱う
-- `contracts/policy/` の device profile / role policy / route class / security mode / RadioBudget を Go runtime が読み、RoutePlanner の gate と diagnostics に反映する
-- RoutePlanner は `local_control / bulk_wifi_only / critical_alert / sparse_summary / lora_relay_1 / wifi_mesh_backbone / redundant_critical` の bearer / role / hop-limit / payload / RadioBudget gate を評価する
-- `production` runtime mode では strict heartbeat subject、declared-size LoRa compatibility block、RadioBudget airtime guard を enforce する
-- sleepy leaf firmware は opt-in deep sleep と RTC persistence / recent command token cache size を Kconfig で切替できる
-- on-air packet key は durable event identity ではなく短期 radio duplicate window として扱い、古い同一 key は新イベントとして通す
-- clean source export を生成し、Python / Go / firmware build smoke CI で主線を守る
-
-Current Alpha Cannot Yet:
-
-- Wi-Fi mesh backbone / LoRa relay / multi-hop routing を本番品質で運用する
-- app intent から bearer/path を完全自動選択する汎用 RoutePlanner として動く
-- route plan / attempt の全候補 scoring、multi-gateway ack owner、redundant settlement を完成済みとして扱う
-- battery sleepy leaf を deep sleep + RTC persistence の field deployment として保証する
-- production security key model / signed lease / anti-replay を提供する
-
-- `Site Router` を durable single writer とする
-- app-facing API に bearer 名を出さない
-- `gateway_head` は USB CDC first
-- LoRa は `JP-safe profile` を初期条件として扱う
-- gateway heartbeat は Host Agent で `heartbeat` envelope に正規化し、Site Router の durable ledger に入れる
-- binary on-air の正本は `contracts/protocol/onair-v1.json` に置く
-- `contracts/protocol/compact-codecs.json` は legacy compact/reference track の artifact として扱う
-- `compact-codecs.json` の frame type `3/4` は USB transport family の shape 管理で、LoRa on-air header そのものの正本ではない
-- LoRa on-air は short ID 前提の binary header / compact command token を優先する
-- `manifest / lease / role / power-class` を queue 前に反映する
-- LoRa route は explicit route class と compact/summary payload fit を通ったものだけ queue する
-- worker lease は `route_status=ready_to_send` の outbox だけを対象にし、`route_pending` は再計画待ちに残す
-- `contract -> integration -> HIL -> soak` を各フェーズで gate にする
-
-## 実装トラック
-
-- `Go mainline`
-  Ubuntu Server 上で動く `Site Router` / `Host Agent` の本線実装
-- `ESP-IDF firmware`
-  `gateway_head` / `sleepy_leaf` / board component の本線実装
-- `Python reference`
-  legacy compact regression と contract 検証のための参照実装。binary on-air の正本ではなく、GA 判定の主軸でもありません
-
-本線は **`Go + ESP-IDF`** です。`Python` はあくまで参照実装で、挙動比較と fixture 検証に使います。
-
-## 責務分担
-
-| Track | 主責務 |
+| Area | What you get |
 | --- | --- |
-| `Go mainline` | durable state, queue, dedupe, `Site Router`, `Host Agent`, CLI / SDK |
-| `ESP-IDF firmware` | board I/O, radio / USB backend, sleepy wake cycle, gateway runtime |
-| `Python reference` | contract validation, fixture replay, behavior comparison |
+| App SDK | `pkg/fabric` で state / event / sleepy command / device registration を扱う typed API |
+| Durable core | SQLite-backed Site Router, message ledger, event/state projection, command ledger, outbox queue |
+| Routing policy | DeviceProfile, role policy, route classes, RadioBudget, strict heartbeat subject, route diagnostics |
+| LoRa protocol | [binary on-air v1](contracts/protocol/onair-v1.json), compact event/state/heartbeat/command/result, short ID, JP payload cap |
+| Gateway path | Host Agent + ESP-IDF gateway-head for USB CDC / LoRa handoff and durable gateway heartbeat |
+| Sleepy nodes | ESP-IDF node-sdk for compact event uplink, tiny command polling, opt-in deep sleep + RTC persistence |
+| Diagnostics | `edge-fabric doctor`, `explain-route`, `queue-metrics`, `decode-onair`, `decode-usb-frame`, clean source export |
+
+## What You Can Build
+
+- Battery motion / leak sensors that wake, emit compact LoRa events, poll for tiny commands, then sleep.
+- Powered Wi-Fi controllers that publish state and receive local commands without putting rich control traffic on LoRa.
+- USB LoRa gateways that normalize radio observations and heartbeat into a durable Site Router.
+- Hybrid route experiments where route classes enforce “LoRa only if compact and within budget” or “Wi-Fi only for bulk/control”.
+- Mesh / relay prototypes using `relay_extension_v1`, `lora_relay_1`, `wifi_mesh_backbone`, and route diagnostics.
+
+## What It Is Not
+
+- It is **not LoRaWAN** and not a LoRaWAN concentrator replacement.
+- It is **not production-certified security** yet. Runtime gates exist, but real key provisioning / signed lease / anti-replay are still hardening work.
+- It is **not fully HIL-validated firmware** yet. ESP-IDF apps and strict backend guards exist, but board-level deep sleep, RF switch, USB DTR/backpressure, and multi-hop behavior still need hardware validation.
+
+## Quick Look
+
+```go
+client, err := fabric.OpenLocal("site.db", "controller-01")
+if err != nil {
+    return err
+}
+defer client.Close()
+
+_, err = client.PublishState(ctx, fabric.State{
+    Source: "sensor-01",
+    Key:    "temperature.c",
+    Value:  24.5,
+})
+
+_, err = client.EmitEvent(ctx, fabric.Event{
+    Source:   "motion-01",
+    Type:     fabric.EventMotionDetected,
+    Severity: fabric.Critical,
+})
+```
+
+```bash
+go run ./cmd/edge-fabric explain-route \
+  -seed-fixtures \
+  -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
+```
+
+## Architecture
+
+```text
+Application / pkg/fabric
+        |
+        v
+Site Router
+  durable ledger / state projection / command queue / RoutePlanner
+        |
+        +--> Host Agent --> USB CDC gateway --> SX1262 LoRa
+        |
+        +--> Wi-Fi / local control path
+        |
+        +--> ESP-IDF sleepy leaf / gateway firmware contracts
+```
+
+## Repository Tracks
+
+| Track | Purpose |
+| --- | --- |
+| Go mainline | Site Router, Host Agent, CLI, SDK, RoutePlanner, durable core |
+| ESP-IDF firmware | `gateway-head`, `node-sdk`, board I/O, USB/radio backend, sleepy cycle |
+| Contracts | Protocol artifacts, policy artifacts, fixtures, compatibility tests |
+| Python reference | Contract validation and legacy/reference behavior comparison |
+
+Python reference は binary on-air の正本ではなく、legacy compact regression と contract 検証のための non-authoritative reference track です。
+
+The implementation source is in `contracts/`, `internal/`, `pkg/`, `cmd/`, `firmware/`, `src/`, and `tests/`. `edge-fabric-esp32sx1262-v3-mesh/` is the reference/ADR material, not the main runtime implementation.
 
 ## Requirements
 
@@ -108,25 +122,13 @@ Current Alpha Cannot Yet:
 
 ## Quickstart
 
-### Go mainline
+### 1. Run the main checks
 
 PowerShell:
 
 ```powershell
 go test ./...
-python .\scripts\doctor.py --require-go
-go run .\cmd\site-router -op doctor
-go run .\cmd\site-router -op seed-fixtures
-go run .\cmd\site-router -op pending-digest -hardware-id battery-leaf-01
 go run .\cmd\edge-fabric doctor
-go run .\cmd\edge-fabric issue-command -seed-fixtures -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
-go run .\cmd\edge-fabric explain-route -seed-fixtures -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
-go run .\cmd\edge-fabric describe-profile -profile motion_sensor_battery_v1
-go run .\cmd\edge-fabric decode-onair -hex <hex-frame>
-go run .\cmd\edge-fabric decode-usb-frame -hex <hex-frame>
-go run .\cmd\host-agent -mode direct-json -input .\contracts\fixtures\event-battery-alert.json
-go run .\cmd\host-agent -mode diagnostics
-go run .\cmd\direct-slice-demo
 go run .\cmd\sleepy-cycle-demo
 ```
 
@@ -134,36 +136,61 @@ Bash:
 
 ```bash
 go test ./...
-python ./scripts/doctor.py --require-go
-go run ./cmd/site-router -op doctor
-go run ./cmd/site-router -op seed-fixtures
 go run ./cmd/edge-fabric doctor
-go run ./cmd/edge-fabric issue-command -seed-fixtures -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
-go run ./cmd/edge-fabric explain-route -seed-fixtures -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
-go run ./cmd/edge-fabric describe-profile -profile motion_sensor_battery_v1
-go run ./cmd/direct-slice-demo
 go run ./cmd/sleepy-cycle-demo
 ```
 
-App-facing Go entrypoint:
+### 2. Try the app-facing SDK
 
 ```go
-client, err := fabric.OpenLocal("site.db", "controller-01")
-if err != nil {
-    return err
-}
-defer client.Close()
+package main
 
-_, err = client.PublishState(ctx, fabric.State{
-    Source: "sensor-01",
-    Key: "temperature.c",
-    Value: 24.5,
-})
+import (
+	"context"
+
+	"github.com/Aero123421/edge-fabric/pkg/fabric"
+)
+
+func main() error {
+	ctx := context.Background()
+	client, err := fabric.OpenLocal("site.db", "controller-01")
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	_, err = client.PublishState(ctx, fabric.State{
+		Source: "sensor-01",
+		Key:    "temperature.c",
+		Value:  24.5,
+	})
+	return err
+}
 ```
 
-外向き SDK は `pkg/fabric` を優先します。`pkg/sdk` の mainline entrypoint は `OpenLocalSite()` / public `ClientBackend` で、`internal/siterouter` は実装詳細です。
+外向き SDK は `pkg/fabric` を優先します。`pkg/sdk` は lower-level integration layer で、`internal/siterouter` は実装詳細です。
 
-Runnable examples:
+### 3. Use the diagnostics CLI
+
+| Command | Purpose |
+| --- | --- |
+| `edge-fabric seed-fixtures` | local demo 用 manifest / lease を投入 |
+| `edge-fabric issue-command -seed-fixtures -fixture ...` | sleepy command を durable queue に発行 |
+| `edge-fabric explain-route -seed-fixtures -fixture ...` | なぜその route になるかを説明 |
+| `edge-fabric queue-metrics` | ready / pending / blocked queue を確認 |
+| `edge-fabric describe-profile -profile motion_sensor_battery_v1` | DeviceProfile の安全制約を表示 |
+| `edge-fabric decode-onair -hex <hex-frame>` | LoRa on-air binary frame を decode |
+| `edge-fabric decode-usb-frame -hex <hex-frame>` | USB CDC frame を decode |
+
+Example:
+
+```bash
+go run ./cmd/edge-fabric explain-route \
+  -seed-fixtures \
+  -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
+```
+
+### 4. Run examples
 
 ```bash
 go run ./examples/01-basic-state
