@@ -65,19 +65,23 @@ type SleepyCommandBuilder struct {
 }
 
 type SendResult struct {
-	MessageID         string
-	CommandID         string
-	QueueID           int64
-	Persisted         bool
-	Duplicate         bool
-	Status            string
-	RouteStatus       string
-	SelectedBearer    string
-	SelectedGatewayID string
-	RouteReason       string
-	PayloadFit        bool
-	ReadyToSend       bool
-	Warnings          []string
+	MessageID          string
+	CommandID          string
+	QueueID            int64
+	Persisted          bool
+	Duplicate          bool
+	Status             string
+	RouteStatus        string
+	SelectedBearer     string
+	SelectedGatewayID  string
+	NextHopID          string
+	FinalTargetID      string
+	NextHopShortID     *int
+	FinalTargetShortID *int
+	RouteReason        string
+	PayloadFit         bool
+	ReadyToSend        bool
+	Warnings           []string
 }
 
 type PublishResult struct {
@@ -311,6 +315,10 @@ func (b *SleepyCommandBuilder) SendResult(ctx context.Context) (*SendResult, err
 			result.RouteStatus = route.RouteStatus
 			result.SelectedBearer = route.SelectedBearer
 			result.SelectedGatewayID = route.SelectedGatewayID
+			result.NextHopID = route.NextHopID
+			result.FinalTargetID = route.FinalTargetID
+			result.NextHopShortID = route.NextHopShortID
+			result.FinalTargetShortID = route.FinalTargetShortID
 			result.RouteReason = route.RouteReason
 			result.PayloadFit = route.PayloadFit
 			result.ReadyToSend = route.RouteStatus == "ready_to_send"

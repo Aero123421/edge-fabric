@@ -40,13 +40,17 @@ type PendingCommandDigest struct {
 }
 
 type RoutePlanSummary struct {
-	QueueID           int64          `json:"queue_id"`
-	RouteStatus       string         `json:"route_status"`
-	SelectedBearer    string         `json:"selected_bearer,omitempty"`
-	SelectedGatewayID string         `json:"selected_gateway_id,omitempty"`
-	RouteReason       string         `json:"route_reason,omitempty"`
-	PayloadFit        bool           `json:"payload_fit"`
-	Detail            map[string]any `json:"detail,omitempty"`
+	QueueID            int64          `json:"queue_id"`
+	RouteStatus        string         `json:"route_status"`
+	SelectedBearer     string         `json:"selected_bearer,omitempty"`
+	SelectedGatewayID  string         `json:"selected_gateway_id,omitempty"`
+	NextHopID          string         `json:"next_hop_id,omitempty"`
+	FinalTargetID      string         `json:"final_target_id,omitempty"`
+	NextHopShortID     *int           `json:"next_hop_short_id,omitempty"`
+	FinalTargetShortID *int           `json:"final_target_short_id,omitempty"`
+	RouteReason        string         `json:"route_reason,omitempty"`
+	PayloadFit         bool           `json:"payload_fit"`
+	Detail             map[string]any `json:"detail,omitempty"`
 }
 
 type ClientBackend interface {
@@ -310,13 +314,17 @@ func (b *siteRouterBackend) OutboxRoutePlan(ctx context.Context, queueID int64) 
 		return nil, err
 	}
 	return &RoutePlanSummary{
-		QueueID:           record.QueueID,
-		RouteStatus:       record.RouteStatus,
-		SelectedBearer:    record.SelectedBearer,
-		SelectedGatewayID: record.SelectedGatewayID,
-		RouteReason:       record.RouteReason,
-		PayloadFit:        record.PayloadFit,
-		Detail:            record.Detail,
+		QueueID:            record.QueueID,
+		RouteStatus:        record.RouteStatus,
+		SelectedBearer:     record.SelectedBearer,
+		SelectedGatewayID:  record.SelectedGatewayID,
+		NextHopID:          record.NextHopID,
+		FinalTargetID:      record.FinalTargetID,
+		NextHopShortID:     record.NextHopShortID,
+		FinalTargetShortID: record.FinalTargetShortID,
+		RouteReason:        record.RouteReason,
+		PayloadFit:         record.PayloadFit,
+		Detail:             record.Detail,
 	}, nil
 }
 

@@ -69,6 +69,26 @@ type HeartbeatRecord struct {
 	Payload          map[string]any `json:"payload"`
 }
 
+type RetentionPolicy struct {
+	HeartbeatRetentionDays       int `json:"heartbeat_retention_days,omitempty"`
+	RadioObservationRetentionHrs int `json:"radio_observation_retention_hours,omitempty"`
+	DeadQueueRetentionDays       int `json:"dead_queue_retention_days,omitempty"`
+	FileChunkRetentionDays       int `json:"file_chunk_retention_days,omitempty"`
+}
+
+type RetentionResult struct {
+	DeletedHeartbeats        int64 `json:"deleted_heartbeats"`
+	DeletedRadioObservations int64 `json:"deleted_radio_observations"`
+	DeletedDeadQueueItems    int64 `json:"deleted_dead_queue_items"`
+	DeletedDeadQueueAttempts int64 `json:"deleted_dead_queue_attempts"`
+	DeletedFileChunks        int64 `json:"deleted_file_chunks"`
+}
+
+type RouterSchemaInfo struct {
+	SchemaVersion int    `json:"schema_version"`
+	OpenedAt      string `json:"opened_at"`
+}
+
 type FabricSummaryRecord struct {
 	SummaryKey       string         `json:"summary_key"`
 	SourceHardwareID string         `json:"source_hardware_id"`
@@ -101,27 +121,35 @@ type OutboundAttempt struct {
 }
 
 type RoutePlan struct {
-	RouteClass     string         `json:"route_class,omitempty"`
-	Bearer         string         `json:"bearer,omitempty"`
-	GatewayID      string         `json:"gateway_id,omitempty"`
-	PathLabel      string         `json:"path_label,omitempty"`
-	AllowRelay     bool           `json:"allow_relay"`
-	AllowRedundant bool           `json:"allow_redundant"`
-	HopLimit       *int           `json:"hop_limit,omitempty"`
-	PayloadFit     bool           `json:"payload_fit"`
-	Reason         string         `json:"reason"`
-	Detail         map[string]any `json:"detail,omitempty"`
+	RouteClass         string         `json:"route_class,omitempty"`
+	Bearer             string         `json:"bearer,omitempty"`
+	GatewayID          string         `json:"gateway_id,omitempty"`
+	NextHopID          string         `json:"next_hop_id,omitempty"`
+	FinalTargetID      string         `json:"final_target_id,omitempty"`
+	NextHopShortID     *int           `json:"next_hop_short_id,omitempty"`
+	FinalTargetShortID *int           `json:"final_target_short_id,omitempty"`
+	PathLabel          string         `json:"path_label,omitempty"`
+	AllowRelay         bool           `json:"allow_relay"`
+	AllowRedundant     bool           `json:"allow_redundant"`
+	HopLimit           *int           `json:"hop_limit,omitempty"`
+	PayloadFit         bool           `json:"payload_fit"`
+	Reason             string         `json:"reason"`
+	Detail             map[string]any `json:"detail,omitempty"`
 }
 
 type OutboxRoutePlanRecord struct {
-	QueueID           int64          `json:"queue_id"`
-	RouteStatus       string         `json:"route_status"`
-	SelectedBearer    string         `json:"selected_bearer,omitempty"`
-	SelectedGatewayID string         `json:"selected_gateway_id,omitempty"`
-	RouteReason       string         `json:"route_reason,omitempty"`
-	PayloadFit        bool           `json:"payload_fit"`
-	RoutePlan         *RoutePlan     `json:"route_plan,omitempty"`
-	Detail            map[string]any `json:"detail,omitempty"`
+	QueueID            int64          `json:"queue_id"`
+	RouteStatus        string         `json:"route_status"`
+	SelectedBearer     string         `json:"selected_bearer,omitempty"`
+	SelectedGatewayID  string         `json:"selected_gateway_id,omitempty"`
+	NextHopID          string         `json:"next_hop_id,omitempty"`
+	FinalTargetID      string         `json:"final_target_id,omitempty"`
+	NextHopShortID     *int           `json:"next_hop_short_id,omitempty"`
+	FinalTargetShortID *int           `json:"final_target_short_id,omitempty"`
+	RouteReason        string         `json:"route_reason,omitempty"`
+	PayloadFit         bool           `json:"payload_fit"`
+	RoutePlan          *RoutePlan     `json:"route_plan,omitempty"`
+	Detail             map[string]any `json:"detail,omitempty"`
 }
 
 type NodeRuntimeInfo struct {
@@ -129,6 +157,8 @@ type NodeRuntimeInfo struct {
 	Manifest   *contracts.Manifest `json:"manifest,omitempty"`
 	Lease      *contracts.Lease    `json:"lease,omitempty"`
 }
+
+type nodeRuntimeLookup func(context.Context, string) (*NodeRuntimeInfo, error)
 
 type Router struct {
 	db            *sql.DB
@@ -201,6 +231,7 @@ func (r *Router) init(ctx context.Context) error {
 	stmts := []string{
 		`PRAGMA journal_mode=WAL;`,
 		`PRAGMA synchronous=FULL;`,
+		`PRAGMA user_version = 1;`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			message_id TEXT PRIMARY KEY,
 			kind TEXT NOT NULL,
@@ -361,6 +392,17 @@ func (r *Router) init(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (r *Router) SchemaInfo(ctx context.Context) (*RouterSchemaInfo, error) {
+	var version int
+	if err := r.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return nil, err
+	}
+	return &RouterSchemaInfo{
+		SchemaVersion: version,
+		OpenedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+	}, nil
 }
 
 func (r *Router) ensureOperationalSchema(ctx context.Context) error {
@@ -1061,12 +1103,24 @@ func (r *Router) UpsertLease(ctx context.Context, hardwareID string, lease *cont
 }
 
 func (r *Router) RuntimeInfoForNode(ctx context.Context, hardwareID string) (*NodeRuntimeInfo, error) {
+	return runtimeInfoForNode(ctx, r.db, hardwareID)
+}
+
+func (r *Router) runtimeInfoForNodeTx(ctx context.Context, tx *sql.Tx, hardwareID string) (*NodeRuntimeInfo, error) {
+	return runtimeInfoForNode(ctx, tx, hardwareID)
+}
+
+type runtimeInfoQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func runtimeInfoForNode(ctx context.Context, querier runtimeInfoQuerier, hardwareID string) (*NodeRuntimeInfo, error) {
 	info := &NodeRuntimeInfo{HardwareID: hardwareID}
 	if hardwareID == "" {
 		return info, nil
 	}
 	var manifestJSON string
-	err := r.db.QueryRowContext(ctx, `SELECT manifest_json FROM node_manifest WHERE hardware_id = ?`, hardwareID).Scan(&manifestJSON)
+	err := querier.QueryRowContext(ctx, `SELECT manifest_json FROM node_manifest WHERE hardware_id = ?`, hardwareID).Scan(&manifestJSON)
 	if err == nil {
 		var manifest contracts.Manifest
 		if err := json.Unmarshal([]byte(manifestJSON), &manifest); err != nil {
@@ -1077,7 +1131,7 @@ func (r *Router) RuntimeInfoForNode(ctx context.Context, hardwareID string) (*No
 		return nil, err
 	}
 	var leaseJSON string
-	err = r.db.QueryRowContext(ctx, `SELECT lease_json FROM node_lease WHERE hardware_id = ?`, hardwareID).Scan(&leaseJSON)
+	err = querier.QueryRowContext(ctx, `SELECT lease_json FROM node_lease WHERE hardware_id = ?`, hardwareID).Scan(&leaseJSON)
 	if err == nil {
 		var lease contracts.Lease
 		if err := json.Unmarshal([]byte(leaseJSON), &lease); err != nil {
@@ -1132,10 +1186,6 @@ func (r *Router) IssueCommand(ctx context.Context, envelope *contracts.Envelope,
 	if err := envelope.Validate(); err != nil {
 		return nil, 0, err
 	}
-	plan, err := r.PlanOutboundRoute(ctx, envelope)
-	if err != nil {
-		return nil, 0, err
-	}
 	queueKey = commandQueueKey(envelope, queueKey)
 	rawEnvelope, err := json.Marshal(envelope)
 	if err != nil {
@@ -1160,6 +1210,12 @@ func (r *Router) IssueCommand(ctx context.Context, envelope *contracts.Envelope,
 			return nil, 0, err
 		}
 		return &PersistAck{AckedMessageID: duplicate, Status: "duplicate", Duplicate: true}, queueID, nil
+	}
+	plan, err := r.planOutboundRoute(ctx, envelope, func(ctx context.Context, hardwareID string) (*NodeRuntimeInfo, error) {
+		return r.runtimeInfoForNodeTx(ctx, tx, hardwareID)
+	})
+	if err != nil {
+		return nil, 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO messages (
@@ -1209,8 +1265,15 @@ func (r *Router) validateOutboundEnvelope(ctx context.Context, envelope *contrac
 }
 
 func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Envelope) (*RoutePlan, error) {
+	return r.planOutboundRoute(ctx, envelope, r.RuntimeInfoForNode)
+}
+
+func (r *Router) planOutboundRoute(ctx context.Context, envelope *contracts.Envelope, lookup nodeRuntimeLookup) (*RoutePlan, error) {
 	if envelope == nil {
 		return nil, contracts.NewValidationError("route planning requires envelope")
+	}
+	if lookup == nil {
+		lookup = r.RuntimeInfoForNode
 	}
 	plan := &RoutePlan{
 		RouteClass:     deliveryRouteClass(envelope.Delivery),
@@ -1226,7 +1289,7 @@ func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Enve
 		plan.PathLabel = "non_node_target"
 		return plan, nil
 	}
-	info, err := r.RuntimeInfoForNode(ctx, envelope.Target.Value)
+	info, err := lookup(ctx, envelope.Target.Value)
 	if err != nil {
 		return nil, err
 	}
@@ -1292,7 +1355,7 @@ func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Enve
 	case "redundant_critical":
 		return r.planPolicyRoute(envelope, plan, info, "redundant_critical", []string{"wifi", "wifi_ip", "wifi_mesh", "lora_direct", "lora_relay"}, true), nil
 	case "lora_relay_1":
-		return r.planPolicyRoute(envelope, plan, info, "lora_relay_1", []string{"lora_relay"}, true), nil
+		return r.planLoRaRelayOneHop(ctx, envelope, plan, info, lookup)
 	case "wifi_mesh_backbone":
 		return r.planPolicyRoute(envelope, plan, info, "wifi_mesh_backbone", []string{"wifi_mesh"}, false), nil
 	case "sparse_summary":
@@ -1334,6 +1397,36 @@ func applyRouteClassDefaults(plan *RoutePlan, delivery *contracts.DeliverySpec) 
 			plan.HopLimit = &hopLimit
 		}
 	}
+}
+
+func (r *Router) planLoRaRelayOneHop(ctx context.Context, envelope *contracts.Envelope, plan *RoutePlan, finalInfo *NodeRuntimeInfo, lookup nodeRuntimeLookup) (*RoutePlan, error) {
+	relayID := payloadString(envelope.Payload, "relay_hardware_id")
+	if relayID == "" {
+		relayID = deliveryIngressValue(envelope.Delivery, "relay_hardware_id")
+	}
+	relayInfo := finalInfo
+	if relayID != "" && relayID != envelope.Target.Value {
+		var err error
+		relayInfo, err = lookup(ctx, relayID)
+		if err != nil {
+			return nil, err
+		}
+		if relayInfo.Lease != nil && relayInfo.Manifest != nil {
+			if err := validateLeaseAgainstManifest(relayInfo.Lease, relayInfo.Manifest); err != nil {
+				return nil, err
+			}
+		}
+		plan.NextHopID = relayID
+		plan.FinalTargetID = envelope.Target.Value
+		plan.Detail["next_hop_hardware_id"] = relayID
+		plan.Detail["final_target_hardware_id"] = envelope.Target.Value
+		if finalInfo != nil && finalInfo.Lease != nil && finalInfo.Lease.FabricShortID != nil {
+			finalShortID := *finalInfo.Lease.FabricShortID
+			plan.FinalTargetShortID = &finalShortID
+			plan.Detail["final_target_short_id"] = finalShortID
+		}
+	}
+	return r.planPolicyRoute(envelope, plan, relayInfo, "lora_relay_1", []string{"lora_relay"}, true), nil
 }
 
 func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, info *NodeRuntimeInfo, routeClass string, allowedBearers []string, allowLoRaIfRepresentable bool) *RoutePlan {
@@ -1399,10 +1492,42 @@ func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, 
 		plan.Detail["payload_fit_source"] = source
 		plan.Detail["profile"] = "JP125_LONG_SF10"
 		plan.Detail["relayed"] = relayed
-		if relayed && info != nil && info.Lease != nil && info.Lease.FabricShortID != nil {
-			plan.Detail["relay_short_id"] = *info.Lease.FabricShortID
-			if finalTarget := payloadInt64(envelope.Payload, "final_target_short_id"); finalTarget != nil {
-				plan.Detail["final_target_short_id"] = *finalTarget
+		if relayed {
+			if info == nil || info.Lease == nil || info.Lease.FabricShortID == nil {
+				plan.PayloadFit = false
+				plan.Reason = "lora_relay_requires_next_hop_short_id"
+				return plan
+			}
+			nextHopShortID := *info.Lease.FabricShortID
+			plan.NextHopShortID = &nextHopShortID
+			if plan.NextHopID == "" {
+				plan.NextHopID = info.HardwareID
+			}
+			if plan.FinalTargetID == "" {
+				if finalTargetID := payloadString(envelope.Payload, "final_target_hardware_id"); finalTargetID != "" {
+					plan.FinalTargetID = finalTargetID
+					plan.Detail["final_target_hardware_id"] = finalTargetID
+				}
+			}
+			plan.Detail["next_hop_short_id"] = nextHopShortID
+			plan.Detail["relay_short_id"] = nextHopShortID
+			if plan.FinalTargetShortID != nil {
+				plan.Detail["final_target_short_id"] = *plan.FinalTargetShortID
+			} else if finalTarget := payloadInt64(envelope.Payload, "final_target_short_id"); finalTarget != nil {
+				if *finalTarget <= 0 || *finalTarget > 0xFFFF {
+					plan.PayloadFit = false
+					plan.Reason = "lora_relay_invalid_final_target_short_id"
+					plan.Detail["final_target_short_id"] = *finalTarget
+					return plan
+				}
+				finalShortID := int(*finalTarget)
+				plan.FinalTargetShortID = &finalShortID
+				plan.Detail["final_target_short_id"] = finalShortID
+			}
+			if plan.FinalTargetShortID == nil {
+				plan.PayloadFit = false
+				plan.Reason = "lora_relay_requires_final_target_short_id"
+				return plan
 			}
 		}
 	}
@@ -1524,6 +1649,10 @@ func (r *Router) OutboxRoutePlan(ctx context.Context, queueID int64) (*OutboxRou
 		}
 		record.RoutePlan = &plan
 		record.Detail = plan.Detail
+		record.NextHopID = plan.NextHopID
+		record.FinalTargetID = plan.FinalTargetID
+		record.NextHopShortID = plan.NextHopShortID
+		record.FinalTargetShortID = plan.FinalTargetShortID
 	}
 	return record, nil
 }
@@ -1899,6 +2028,52 @@ func (r *Router) LatestHeartbeatBySubject(ctx context.Context, subjectKind, subj
 	return r.latestHeartbeatByKey(ctx, subjectKind+":"+subjectID)
 }
 
+func (r *Router) ListHeartbeats(ctx context.Context, subjectKind string, limit int) ([]HeartbeatRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if subjectKind == "" {
+		rows, err = r.db.QueryContext(ctx, `
+			SELECT heartbeat_key, COALESCE(gateway_id, ''), COALESCE(subject_kind, ''), COALESCE(subject_id, ''),
+				source_hardware_id, ingress_id, COALESCE(host_link, ''), COALESCE(bearer, ''),
+				COALESCE(status, ''), live, message_id, payload_json, updated_at
+			FROM heartbeat_ledger
+			ORDER BY updated_at DESC, heartbeat_key ASC
+			LIMIT ?
+		`, limit)
+	} else {
+		rows, err = r.db.QueryContext(ctx, `
+			SELECT heartbeat_key, COALESCE(gateway_id, ''), COALESCE(subject_kind, ''), COALESCE(subject_id, ''),
+				source_hardware_id, ingress_id, COALESCE(host_link, ''), COALESCE(bearer, ''),
+				COALESCE(status, ''), live, message_id, payload_json, updated_at
+			FROM heartbeat_ledger
+			WHERE subject_kind = ?
+			ORDER BY updated_at DESC, heartbeat_key ASC
+			LIMIT ?
+		`, subjectKind, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := []HeartbeatRecord{}
+	for rows.Next() {
+		record, err := scanHeartbeatRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, *record)
+	}
+	return records, rows.Err()
+}
+
 func (r *Router) latestHeartbeatByKey(ctx context.Context, heartbeatKey string) (*HeartbeatRecord, error) {
 	var (
 		gatewayID   string
@@ -1927,6 +2102,36 @@ func (r *Router) latestHeartbeatByKey(ctx context.Context, heartbeatKey string) 
 	if err != nil {
 		return nil, err
 	}
+	return heartbeatRecordFromValues(heartbeatKey, gatewayID, subjectKind, subjectID, sourceID, ingressID, hostLink, bearer, status, live, messageID, payload, updatedAt)
+}
+
+type heartbeatScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanHeartbeatRecord(scanner heartbeatScanner) (*HeartbeatRecord, error) {
+	var (
+		heartbeatKey string
+		gatewayID    string
+		subjectKind  string
+		subjectID    string
+		sourceID     string
+		ingressID    string
+		hostLink     string
+		bearer       string
+		status       string
+		live         int
+		messageID    string
+		payload      string
+		updatedAt    string
+	)
+	if err := scanner.Scan(&heartbeatKey, &gatewayID, &subjectKind, &subjectID, &sourceID, &ingressID, &hostLink, &bearer, &status, &live, &messageID, &payload, &updatedAt); err != nil {
+		return nil, err
+	}
+	return heartbeatRecordFromValues(heartbeatKey, gatewayID, subjectKind, subjectID, sourceID, ingressID, hostLink, bearer, status, live, messageID, payload, updatedAt)
+}
+
+func heartbeatRecordFromValues(heartbeatKey, gatewayID, subjectKind, subjectID, sourceID, ingressID, hostLink, bearer, status string, live int, messageID, payload, updatedAt string) (*HeartbeatRecord, error) {
 	var payloadMap map[string]any
 	if err := json.Unmarshal([]byte(payload), &payloadMap); err != nil {
 		return nil, err
@@ -1946,6 +2151,85 @@ func (r *Router) latestHeartbeatByKey(ctx context.Context, heartbeatKey string) 
 		UpdatedAt:        updatedAt,
 		Payload:          payloadMap,
 	}, nil
+}
+
+func (r *Router) Compact(ctx context.Context, policy RetentionPolicy, now time.Time) (*RetentionResult, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result := &RetentionResult{}
+	var err error
+	if policy.HeartbeatRetentionDays > 0 {
+		result.DeletedHeartbeats, err = r.deleteOlderThan(ctx, "heartbeat_ledger", "updated_at", now.AddDate(0, 0, -policy.HeartbeatRetentionDays), "")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if policy.RadioObservationRetentionHrs > 0 {
+		result.DeletedRadioObservations, err = r.deleteOlderThan(ctx, "radio_packet_observation", "last_seen_at", now.Add(-time.Duration(policy.RadioObservationRetentionHrs)*time.Hour), "")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if policy.DeadQueueRetentionDays > 0 {
+		deadQueues, deadAttempts, err := r.deleteDeadQueueOlderThan(ctx, now.AddDate(0, 0, -policy.DeadQueueRetentionDays))
+		if err != nil {
+			return nil, err
+		}
+		result.DeletedDeadQueueItems = deadQueues
+		result.DeletedDeadQueueAttempts = deadAttempts
+	}
+	if policy.FileChunkRetentionDays > 0 {
+		result.DeletedFileChunks, err = r.deleteOlderThan(ctx, "file_chunk_ledger", "updated_at", now.AddDate(0, 0, -policy.FileChunkRetentionDays), "")
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func (r *Router) deleteDeadQueueOlderThan(ctx context.Context, cutoff time.Time) (int64, int64, error) {
+	cutoffValue := cutoff.UTC().Format(time.RFC3339Nano)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	attempts, err := tx.ExecContext(ctx, `
+		DELETE FROM outbox_attempt
+		WHERE queue_id IN (
+			SELECT id FROM outbox_queue
+			WHERE updated_at < ? AND status = 'dead'
+		)
+	`, cutoffValue)
+	if err != nil {
+		return 0, 0, err
+	}
+	queues, err := tx.ExecContext(ctx, `
+		DELETE FROM outbox_queue
+		WHERE updated_at < ? AND status = 'dead'
+	`, cutoffValue)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	deletedAttempts, _ := attempts.RowsAffected()
+	deletedQueues, _ := queues.RowsAffected()
+	return deletedQueues, deletedAttempts, nil
+}
+
+func (r *Router) deleteOlderThan(ctx context.Context, table, column string, cutoff time.Time, extraPredicate string) (int64, error) {
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s < ?", table, column)
+	if extraPredicate != "" {
+		query += " AND " + extraPredicate
+	}
+	result, err := r.db.ExecContext(ctx, query, cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (r *Router) LatestFabricSummary(ctx context.Context, summaryKey string) (*FabricSummaryRecord, error) {

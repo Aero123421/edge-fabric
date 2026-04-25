@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import re
 import unittest
 from pathlib import Path
@@ -454,6 +455,33 @@ class ContractTests(unittest.TestCase):
             if route_class:
                 self.assertIn(route_class, routes, fixture)
 
+    def test_clean_export_rejects_sqlite_sidecars(self) -> None:
+        script_path = ROOT / "scripts" / "export_clean_repo.py"
+        spec = importlib.util.spec_from_file_location("export_clean_repo", script_path)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(module)
+        for path in (
+            "site-router.db",
+            "site-router.db-wal",
+            "site-router.db-shm",
+            "nested/direct-slice-demo.db-wal",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(module.should_skip_path(path))
+
+    def test_gateway_production_profile_documents_provisioning_and_verification(self) -> None:
+        defaults = (ROOT / "firmware/esp-idf/gateway-head/sdkconfig.production.defaults").read_text(
+            encoding="utf-8"
+        )
+        readme = (ROOT / "firmware/esp-idf/gateway-head/README.md").read_text(
+            encoding="utf-8"
+        ).lower()
+        if "CONFIG_SECURE_BOOT=y" in defaults or "CONFIG_SECURE_FLASH_ENC_ENABLED=y" in defaults:
+            for required in ("provisioning", "efuse", "reconfigure", "検証"):
+                self.assertIn(required, readme)
+
     def test_policy_artifacts_are_referenced_by_go_runtime(self) -> None:
         routes = self._load_json("contracts/policy/route-classes.json")["route_classes"]
         router_source = (ROOT / "internal" / "siterouter" / "router.go").read_text(
@@ -492,6 +520,8 @@ class ContractTests(unittest.TestCase):
             allowed = re.findall(r'"([^"]+)"', allowed_expr)
             runtime_routes[route_case] = allowed
             self.assertEqual(any(value.startswith("lora") for value in allowed), allow_lora == "true")
+        if 'case "lora_relay_1":' in router_source and "planLoRaRelayOneHop" in router_source:
+            runtime_routes["lora_relay_1"] = ["lora_relay"]
 
         self.assertEqual(set(routes), set(runtime_routes))
         for route_class, policy in routes.items():

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Aero123421/edge-fabric/internal/devfixtures"
 	"github.com/Aero123421/edge-fabric/internal/protocol/onair"
@@ -29,17 +30,38 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "doctor":
+		dbPath := ":memory:"
+		router, err := siterouter.Open(dbPath, 3)
+		if err != nil {
+			return err
+		}
+		defer router.Close()
+		schema, err := router.SchemaInfo(context.Background())
+		if err != nil {
+			return err
+		}
 		return printJSON(map[string]any{
-			"status": "ok",
+			"status":  "ok",
+			"db_path": "in-memory",
+			"schema":  schema,
 			"commands": []string{
 				"edge-fabric seed-fixtures",
 				"edge-fabric explain-route -seed-fixtures -fixture contracts/fixtures/command-sleepy-threshold-set.json",
+				"edge-fabric queue-metrics",
+				"edge-fabric list-heartbeats",
 				"edge-fabric decode-onair -hex <hex-frame>",
 				"edge-fabric decode-usb-frame -hex <hex-frame>",
+				"edge-fabric compact -dry-run",
 			},
 		})
 	case "seed-fixtures":
 		return seedFixtures(args[1:])
+	case "queue-metrics":
+		return queueMetrics(args[1:])
+	case "list-heartbeats":
+		return listHeartbeats(args[1:])
+	case "compact":
+		return compact(args[1:])
 	case "explain-route":
 		return explainRoute(args[1:])
 	case "decode-onair":
@@ -52,7 +74,7 @@ func run(args []string) error {
 }
 
 func usage() error {
-	return fmt.Errorf("usage: edge-fabric doctor | seed-fixtures [-db site-router.db] | explain-route -fixture <envelope.json> [-seed-fixtures|-manifest file -lease file] [-db site-router.db] | decode-onair -hex <hex-frame> | decode-usb-frame -hex <hex-frame>")
+	return fmt.Errorf("usage: edge-fabric doctor | seed-fixtures [-db site-router.db] [-max-retry n] | queue-metrics [-db site-router.db] [-max-retry n] | list-heartbeats [-db site-router.db] [-subject-kind kind] [-limit n] [-max-retry n] | compact [-db site-router.db] [-dry-run] [-heartbeat-days n] [-radio-hours n] [-dead-queue-days n] [-file-chunk-days n] [-max-retry n] | explain-route -fixture <envelope.json> [-seed-fixtures|-manifest file -lease file] [-db site-router.db] [-strict] [-max-retry n] | decode-onair -hex <hex-frame> | decode-usb-frame -hex <hex-frame>")
 }
 
 func seedFixtures(args []string) error {
@@ -72,6 +94,79 @@ func seedFixtures(args []string) error {
 		return err
 	}
 	return printJSON(map[string]any{"db_path": *dbPath, "seeded": seeded})
+}
+
+func queueMetrics(args []string) error {
+	fs := flag.NewFlagSet("queue-metrics", flag.ContinueOnError)
+	dbPath := fs.String("db", "site-router.db", "SQLite database path")
+	maxRetry := fs.Int("max-retry", 3, "max outbound retry count")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	router, err := siterouter.Open(*dbPath, *maxRetry)
+	if err != nil {
+		return err
+	}
+	defer router.Close()
+	metrics, err := router.QueueMetrics(context.Background())
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"db_path": *dbPath, "queue_metrics": metrics})
+}
+
+func listHeartbeats(args []string) error {
+	fs := flag.NewFlagSet("list-heartbeats", flag.ContinueOnError)
+	dbPath := fs.String("db", "site-router.db", "SQLite database path")
+	subjectKind := fs.String("subject-kind", "", "optional heartbeat subject_kind filter")
+	limit := fs.Int("limit", 50, "maximum records to return")
+	maxRetry := fs.Int("max-retry", 3, "max outbound retry count")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	router, err := siterouter.Open(*dbPath, *maxRetry)
+	if err != nil {
+		return err
+	}
+	defer router.Close()
+	records, err := router.ListHeartbeats(context.Background(), *subjectKind, *limit)
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"db_path": *dbPath, "heartbeats": records})
+}
+
+func compact(args []string) error {
+	fs := flag.NewFlagSet("compact", flag.ContinueOnError)
+	dbPath := fs.String("db", "site-router.db", "SQLite database path")
+	dryRun := fs.Bool("dry-run", false, "show the retention policy without deleting rows")
+	heartbeatDays := fs.Int("heartbeat-days", 30, "heartbeat latest rows older than this are removed")
+	radioHours := fs.Int("radio-hours", 24, "radio observations older than this are removed")
+	deadQueueDays := fs.Int("dead-queue-days", 14, "dead queue rows older than this are removed")
+	fileChunkDays := fs.Int("file-chunk-days", 3, "file chunk rows older than this are removed")
+	maxRetry := fs.Int("max-retry", 3, "max outbound retry count")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	policy := siterouter.RetentionPolicy{
+		HeartbeatRetentionDays:       *heartbeatDays,
+		RadioObservationRetentionHrs: *radioHours,
+		DeadQueueRetentionDays:       *deadQueueDays,
+		FileChunkRetentionDays:       *fileChunkDays,
+	}
+	if *dryRun {
+		return printJSON(map[string]any{"db_path": *dbPath, "dry_run": true, "policy": policy})
+	}
+	router, err := siterouter.Open(*dbPath, *maxRetry)
+	if err != nil {
+		return err
+	}
+	defer router.Close()
+	result, err := router.Compact(context.Background(), policy, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"db_path": *dbPath, "policy": policy, "result": result})
 }
 
 func explainRoute(args []string) error {

@@ -897,6 +897,24 @@ func TestSleepyTinyControlRequiresLeaseAndShortID(t *testing.T) {
 	if routeRecord == nil || routeRecord.RouteStatus != "ready_to_send" || routeRecord.SelectedBearer != "lora_direct" || routeRecord.RoutePlan == nil {
 		t.Fatalf("unexpected persisted route plan: %+v", routeRecord)
 	}
+	if err := router.UpsertManifest(ctx, "sleepy-04", &contracts.Manifest{
+		HardwareID:          "sleepy-04",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "primary_battery",
+		WakeClass:           "sleepy_event",
+		SupportedBearers:    []string{"wifi"},
+		AllowedNetworkRoles: []string{"sleepy_leaf"},
+		Firmware:            map[string]any{"app": "0.1.1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	duplicateAck, duplicateQueueID, err := router.IssueCommand(ctx, command, "local", "")
+	if err != nil {
+		t.Fatalf("duplicate command must remain idempotent even if current route policy changes: %v", err)
+	}
+	if duplicateAck == nil || !duplicateAck.Duplicate || duplicateQueueID != queueID {
+		t.Fatalf("unexpected duplicate command result: ack=%+v queue_id=%d original_queue_id=%d", duplicateAck, duplicateQueueID, queueID)
+	}
 }
 
 func TestLoRaPrimaryRequiresExplicitCompactRouteClass(t *testing.T) {
@@ -1030,6 +1048,13 @@ func TestRoutePendingQueueIsNotLeased(t *testing.T) {
 	if metrics["queued_route_pending_count"] != 1 || metrics["queued_ready_count"] != 0 {
 		t.Fatalf("expected route_pending metrics, got %+v", metrics)
 	}
+	schema, err := router.SchemaInfo(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema.SchemaVersion != 1 || schema.OpenedAt == "" {
+		t.Fatalf("unexpected schema info: %+v", schema)
+	}
 }
 
 func TestQueueMetricsBreakDownRouteStatus(t *testing.T) {
@@ -1151,7 +1176,7 @@ func TestDeliveryRelayIntentAffectsPolicyRoute(t *testing.T) {
 			AllowRelay: boolPtr(true),
 			HopLimit:   &hopLimit,
 		},
-		Payload: map[string]any{"event_type": "motion_detected", "severity": "critical"},
+		Payload: map[string]any{"event_type": "motion_detected", "severity": "critical", "final_target_short_id": 224},
 	}
 	plan, err := router.PlanOutboundRoute(ctx, event)
 	if err != nil {
@@ -1311,7 +1336,7 @@ func TestRoutePlannerSupportsMeshRelayBackboneAndRedundantCritical(t *testing.T)
 				Source:        contracts.SourceRef{HardwareID: "controller-" + tt.hardwareID},
 				Target:        contracts.TargetRef{Kind: "node", Value: tt.hardwareID},
 				Delivery:      &contracts.DeliverySpec{RouteClass: tt.routeClass},
-				Payload:       map[string]any{"payload_bytes": 4},
+				Payload:       map[string]any{"payload_bytes": 4, "final_target_short_id": 501},
 			}
 			plan, err := router.PlanOutboundRoute(ctx, event)
 			if err != nil {
@@ -1335,6 +1360,27 @@ func TestRoutePlannerSupportsMeshRelayBackboneAndRedundantCritical(t *testing.T)
 func TestLoRaRelayOneHopUsesRelayedPayloadCap(t *testing.T) {
 	router := openTestRouter(t)
 	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, "leaf-behind-relay-01", &contracts.Manifest{
+		HardwareID:          "leaf-behind-relay-01",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "primary_battery",
+		WakeClass:           "sleepy_event",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"sleepy_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "leaf-behind-relay-01", &contracts.Lease{
+		RoleLeaseID:      "lease-leaf-behind-relay",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-leaf-behind-relay",
+		FabricShortID:    intPtr(201),
+		EffectiveRole:    "sleepy_leaf",
+		PrimaryBearer:    "lora",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := router.UpsertManifest(ctx, "relay-hop-01", &contracts.Manifest{
 		HardwareID:          "relay-hop-01",
 		DeviceFamily:        "xiao-esp32s3-sx1262",
@@ -1362,27 +1408,61 @@ func TestLoRaRelayOneHopUsesRelayedPayloadCap(t *testing.T) {
 		Kind:          "fabric_summary",
 		Priority:      "normal",
 		Source:        contracts.SourceRef{HardwareID: "controller-relay-hop"},
-		Target:        contracts.TargetRef{Kind: "node", Value: "relay-hop-01"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "leaf-behind-relay-01"},
 		Delivery:      &contracts.DeliverySpec{RouteClass: "lora_relay_1"},
-		Payload:       map[string]any{"payload_bytes": 6, "final_target_short_id": 201},
+		Payload:       map[string]any{"payload_bytes": 6, "relay_hardware_id": "relay-hop-01"},
 	}
 	plan, err := router.PlanOutboundRoute(ctx, ok)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !plan.PayloadFit || plan.Bearer != "lora_relay" || plan.Detail["relayed"] != true ||
-		plan.Detail["relay_short_id"].(int) != 302 || plan.Detail["final_target_short_id"].(int64) != 201 {
+		plan.NextHopID != "relay-hop-01" || plan.FinalTargetID != "leaf-behind-relay-01" ||
+		plan.NextHopShortID == nil || *plan.NextHopShortID != 302 ||
+		plan.FinalTargetShortID == nil || *plan.FinalTargetShortID != 201 ||
+		plan.Detail["relay_short_id"].(int) != 302 || plan.Detail["final_target_short_id"].(int) != 201 {
 		t.Fatalf("unexpected relayed plan: %+v", plan)
 	}
 	tooLarge := *ok
 	tooLarge.MessageID = "msg-relay-hop-large"
-	tooLarge.Payload = map[string]any{"payload_bytes": 7}
+	tooLarge.Payload = map[string]any{"payload_bytes": 7, "relay_hardware_id": "relay-hop-01"}
 	plan, err = router.PlanOutboundRoute(ctx, &tooLarge)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plan.PayloadFit || plan.Reason != "lora_payload_too_large" {
 		t.Fatalf("expected relayed payload cap gate, got %+v", plan)
+	}
+	noFinalShort := *ok
+	noFinalShort.MessageID = "msg-relay-hop-no-final-short"
+	noFinalShort.Target = contracts.TargetRef{Kind: "node", Value: "relayless-leaf-01"}
+	noFinalShort.Payload = map[string]any{"payload_bytes": 6, "relay_hardware_id": "relay-hop-01"}
+	if err := router.UpsertManifest(ctx, "relayless-leaf-01", &contracts.Manifest{
+		HardwareID:          "relayless-leaf-01",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "primary_battery",
+		WakeClass:           "sleepy_event",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"sleepy_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "relayless-leaf-01", &contracts.Lease{
+		RoleLeaseID:      "lease-relayless-leaf",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-relayless-leaf",
+		EffectiveRole:    "sleepy_leaf",
+		PrimaryBearer:    "lora",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = router.PlanOutboundRoute(ctx, &noFinalShort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PayloadFit || plan.Reason != "lora_relay_requires_final_target_short_id" {
+		t.Fatalf("expected final target short id gate, got %+v", plan)
 	}
 }
 
@@ -1823,6 +1903,20 @@ func TestHeartbeatSummaryAndFileChunkSemantics(t *testing.T) {
 	if nodeRecord == nil || nodeRecord.HeartbeatKey != "node:gw-alpha" || nodeRecord.SubjectKind != "node" {
 		t.Fatalf("expected node heartbeat to keep separate key, got %+v", nodeRecord)
 	}
+	heartbeats, err := router.ListHeartbeats(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(heartbeats) != 2 {
+		t.Fatalf("expected gateway and node heartbeats, got %+v", heartbeats)
+	}
+	nodeHeartbeats, err := router.ListHeartbeats(ctx, "node", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodeHeartbeats) != 1 || nodeHeartbeats[0].HeartbeatKey != "node:gw-alpha" {
+		t.Fatalf("expected node-filtered heartbeat list, got %+v", nodeHeartbeats)
+	}
 	gatewayRecord, err := router.LatestHeartbeatBySubject(ctx, "gateway", "gw-alpha")
 	if err != nil {
 		t.Fatal(err)
@@ -1877,6 +1971,21 @@ func TestHeartbeatSummaryAndFileChunkSemantics(t *testing.T) {
 	}
 	if progress == nil || progress.ReceivedChunks != 3 || !progress.Complete {
 		t.Fatalf("unexpected file chunk progress: %+v", progress)
+	}
+
+	old := time.Now().UTC().AddDate(0, 0, -40).Format(time.RFC3339Nano)
+	if _, err := router.db.ExecContext(ctx, `UPDATE heartbeat_ledger SET updated_at = ?`, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.db.ExecContext(ctx, `UPDATE file_chunk_ledger SET updated_at = ?`, old); err != nil {
+		t.Fatal(err)
+	}
+	result, err := router.Compact(ctx, RetentionPolicy{HeartbeatRetentionDays: 30, FileChunkRetentionDays: 3}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedHeartbeats != 2 || result.DeletedFileChunks != 3 {
+		t.Fatalf("unexpected retention result: %+v", result)
 	}
 }
 
@@ -1934,6 +2043,24 @@ func TestOutboundAttemptLedgerTracksPathChoices(t *testing.T) {
 	}
 	if len(attempts) != 1 || attempts[0].Status != "sent_ok" || attempts[0].GatewayID != "gw-a" {
 		t.Fatalf("unexpected attempts: %+v", attempts)
+	}
+	old := time.Now().UTC().AddDate(0, 0, -30).Format(time.RFC3339Nano)
+	if _, err := router.db.ExecContext(ctx, `UPDATE outbox_queue SET status = 'dead', updated_at = ? WHERE id = ?`, old, queueID); err != nil {
+		t.Fatal(err)
+	}
+	result, err := router.Compact(ctx, RetentionPolicy{DeadQueueRetentionDays: 14}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedDeadQueueItems != 1 || result.DeletedDeadQueueAttempts != 1 {
+		t.Fatalf("expected dead queue and attempt retention cleanup, got %+v", result)
+	}
+	attempts, err = router.ListOutboundAttempts(ctx, queueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("dead queue compaction must remove orphaned attempts, got %+v", attempts)
 	}
 }
 

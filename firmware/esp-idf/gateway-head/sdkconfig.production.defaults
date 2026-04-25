@@ -1,0 +1,7 @@
+# Hardening starter profile. Before flashing real devices, provision secure
+# boot / flash encryption keys with the ESP-IDF production flow and verify the
+# generated sdkconfig after `idf.py reconfigure`.
+CONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS=y
+CONFIG_SECURE_BOOT=y
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_NVS_ENCRYPTION=y

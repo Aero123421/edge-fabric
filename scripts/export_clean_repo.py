@@ -27,8 +27,10 @@ FORBIDDEN_FILES = (
     "sleepy-cycle-demo.spool.jsonl",
     "sleepy-cycle-demo.spool.heartbeat.json",
     "host-agent-spool.heartbeat.json",
+    "host-agent-spool.jsonl",
+    "site-router.db",
 )
-FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".egg-info", ".egg-info/")
+FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".egg-info", ".egg-info/", ".db-wal", ".db-shm")
 FORBIDDEN_PATH_PARTS = (".egg-info/",)
 
 

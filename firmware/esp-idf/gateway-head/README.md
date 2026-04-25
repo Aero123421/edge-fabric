@@ -41,6 +41,7 @@ backend 差し込み面:
 
 - `gateway_head_runtime_start()` は delivery path が未設定だと `ESP_ERR_INVALID_STATE` を返します
 - `main.c` は TinyUSB が有効な build では `gateway_head_runtime_use_real_backends()` を優先します。`CONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS=y` の build では prototype path の初期化に失敗した時点で fail-fast し、development backend へフォールバックしません。未設定時だけ warning を出して `gateway_head_runtime_use_default_backends()` にフォールバックします
+- production hardening starter profile は `sdkconfig.production.defaults` を重ねて使います。この profile は real backend 必須にし、secure boot / flash encryption / NVS encryption の Kconfig を有効化するための出発点です。実機へ焼く前に ESP-IDF の production provisioning flow で secure boot / flash encryption key と eFuse の irreversible 設定を確認し、`idf.py -D SDKCONFIG_DEFAULTS=\"sdkconfig.defaults;sdkconfig.production.defaults\" reconfigure` 後の generated `sdkconfig` で期待する security option が有効になっていることを検証してください。development backend への silent fallback は禁止されます
 - 実機 backend に差し替える場合は
   `gateway_head_runtime_use_real_backends() -> gateway_head_runtime_start()`
   もしくは
