@@ -128,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(__file__).resolve().parent.parent
     required = [
         root / "README.md",
+        root / "flake.nix",
         root / "pyproject.toml",
         root / "src" / "edge_fabric",
         root / "contracts" / "protocol" / "jp-safe-profiles.json",
@@ -137,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         root / "contracts" / "protocol" / "sleepy-command-policy.json",
         root / "cmd" / "sleepy-cycle-demo",
         root / "docs" / "KNOWN_LIMITATIONS.md",
+        root / "docs" / "NIX.md",
         root / "docs" / "SUPPORT_MATRIX.md",
         root / ".gitattributes",
         root / "edge-fabric-esp32sx1262-v3-mesh",
@@ -247,6 +249,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if ".tools\\go-sdk\\bin\\go.exe" in readme or "./.tools/go-sdk/bin/go.exe" in readme:
         print("README must not rely on maintainer-local .tools Go path")
+        return 1
+    if "nix develop" not in readme:
+        print("README must document the Nix development shell")
         return 1
     legacy_boundary_error = validate_legacy_payload_boundaries(root)
     if legacy_boundary_error:

@@ -98,8 +98,20 @@ The implementation source is in `contracts/`, `internal/`, `pkg/`, `cmd/`, `firm
   参照実装と補助スクリプト
 - `ESP-IDF 5.2+`
   `ESP32-S3` firmware
+- `Nix`
+  Ubuntu / Raspberry Pi HIL runner 向けの再現可能な host-side dev shell
 
 `Go` は `PATH` 上の標準ツールチェーンを前提にします。maintainer ローカルの補助 toolchain を使う場合でも、公開物と CI の正本は `go` コマンドです。
+
+Linux / Raspberry Pi では Nix shell も使えます。
+
+```bash
+nix develop
+go test ./...
+python -S scripts/doctor.py --require-go
+```
+
+Nix shell は Go / Python / pyserial / esptool / usbutils / jq / sqlite などの host-side tools を揃えます。ESP-IDF full toolchain は現時点では外部 install 前提です。詳細は [docs/NIX.md](docs/NIX.md) を参照してください。
 
 ## ディレクトリ
 
