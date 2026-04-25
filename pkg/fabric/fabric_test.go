@@ -92,6 +92,17 @@ func TestFabricDeviceProfileAndSleepyBuilder(t *testing.T) {
 	if !result.ReadyToSend || result.RouteStatus != "ready_to_send" || result.SelectedBearer != "lora_direct" || !result.PayloadFit {
 		t.Fatalf("expected app-facing route result, got %+v", result)
 	}
+	explain, err := client.SleepyCommand("sleepy-fabric-01").
+		ThresholdSet(43).
+		CommandID("cmd-fabric-threshold-explain").
+		ExpiresIn(5 * time.Minute).
+		Explain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !explain.ReadyToSend || explain.QueueID != 0 || explain.SelectedBearer != "lora_direct" {
+		t.Fatalf("expected non-persisting route explanation, got %+v", explain)
+	}
 }
 
 func TestFabricRejectsOutOfRangeShortID(t *testing.T) {

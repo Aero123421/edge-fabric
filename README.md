@@ -114,10 +114,11 @@ go test ./...
 python .\scripts\doctor.py --require-go
 go run .\cmd\site-router -op doctor
 go run .\cmd\site-router -op seed-fixtures
-go run .\cmd\site-router -op issue-command -seed-fixtures -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
 go run .\cmd\site-router -op pending-digest -hardware-id battery-leaf-01
 go run .\cmd\edge-fabric doctor
+go run .\cmd\edge-fabric issue-command -seed-fixtures -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
 go run .\cmd\edge-fabric explain-route -seed-fixtures -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
+go run .\cmd\edge-fabric describe-profile -profile motion_sensor_battery_v1
 go run .\cmd\edge-fabric decode-onair -hex <hex-frame>
 go run .\cmd\edge-fabric decode-usb-frame -hex <hex-frame>
 go run .\cmd\host-agent -mode direct-json -input .\contracts\fixtures\event-battery-alert.json
@@ -133,9 +134,10 @@ go test ./...
 python ./scripts/doctor.py --require-go
 go run ./cmd/site-router -op doctor
 go run ./cmd/site-router -op seed-fixtures
-go run ./cmd/site-router -op issue-command -seed-fixtures -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
 go run ./cmd/edge-fabric doctor
+go run ./cmd/edge-fabric issue-command -seed-fixtures -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
 go run ./cmd/edge-fabric explain-route -seed-fixtures -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
+go run ./cmd/edge-fabric describe-profile -profile motion_sensor_battery_v1
 go run ./cmd/direct-slice-demo
 go run ./cmd/sleepy-cycle-demo
 ```

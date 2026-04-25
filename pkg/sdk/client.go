@@ -56,9 +56,11 @@ type RoutePlanSummary struct {
 type ClientBackend interface {
 	IngestEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID string) (*PersistAck, error)
 	IssueCommandEnvelope(ctx context.Context, envelope *contracts.Envelope, ingressID, queueKey string) (*PersistAck, int64, error)
+	ExplainRouteEnvelope(ctx context.Context, envelope *contracts.Envelope) (*RoutePlanSummary, error)
 	OutboxRoutePlan(ctx context.Context, queueID int64) (*RoutePlanSummary, error)
 	UpsertManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error
 	UpsertLease(ctx context.Context, hardwareID string, lease *contracts.Lease) error
+	RegisterDevice(ctx context.Context, hardwareID string, manifest *contracts.Manifest, lease *contracts.Lease) error
 	CommandState(ctx context.Context, commandID string) (string, error)
 	PendingCommandDigest(ctx context.Context, targetHardwareID string, now time.Time) (*PendingCommandDigest, error)
 	ResolveCommandIDByTokenForTarget(ctx context.Context, targetHardwareID string, token uint16) (string, error)
@@ -93,6 +95,13 @@ func (c *LocalSiteRouterClient) Close() error {
 		return nil
 	}
 	return c.backend.Close()
+}
+
+func (c *LocalSiteRouterClient) SourceID() string {
+	if c == nil || c.sourceID == "" {
+		return "local-client"
+	}
+	return c.sourceID
 }
 
 func (c *LocalSiteRouterClient) PublishState(ctx context.Context, hardwareID, stateKey string, payload map[string]any, priority string) (*PersistAck, error) {
@@ -205,6 +214,10 @@ func (c *LocalSiteRouterClient) RegisterLease(ctx context.Context, hardwareID st
 	return c.backend.UpsertLease(ctx, hardwareID, lease)
 }
 
+func (c *LocalSiteRouterClient) RegisterDevice(ctx context.Context, hardwareID string, manifest *contracts.Manifest, lease *contracts.Lease) error {
+	return c.backend.RegisterDevice(ctx, hardwareID, manifest, lease)
+}
+
 func (c *LocalSiteRouterClient) ObserveCommand(ctx context.Context, commandID string) (string, error) {
 	return c.backend.CommandState(ctx, commandID)
 }
@@ -215,6 +228,10 @@ func (c *LocalSiteRouterClient) PendingCommandDigest(ctx context.Context, target
 
 func (c *LocalSiteRouterClient) OutboxRoutePlan(ctx context.Context, queueID int64) (*RoutePlanSummary, error) {
 	return c.backend.OutboxRoutePlan(ctx, queueID)
+}
+
+func (c *LocalSiteRouterClient) ExplainRoute(ctx context.Context, envelope *contracts.Envelope) (*RoutePlanSummary, error) {
+	return c.backend.ExplainRouteEnvelope(ctx, envelope)
 }
 
 func newMessageID() string {
@@ -308,11 +325,23 @@ func (b *siteRouterBackend) IssueCommandEnvelope(ctx context.Context, envelope *
 	return fromRouterAck(ack), queueID, nil
 }
 
+func (b *siteRouterBackend) ExplainRouteEnvelope(ctx context.Context, envelope *contracts.Envelope) (*RoutePlanSummary, error) {
+	record, err := b.router.PlanOutboundRouteSummary(ctx, envelope)
+	if err != nil || record == nil {
+		return nil, err
+	}
+	return routePlanSummaryFromRecord(record), nil
+}
+
 func (b *siteRouterBackend) OutboxRoutePlan(ctx context.Context, queueID int64) (*RoutePlanSummary, error) {
 	record, err := b.router.OutboxRoutePlan(ctx, queueID)
 	if err != nil || record == nil {
 		return nil, err
 	}
+	return routePlanSummaryFromRecord(record), nil
+}
+
+func routePlanSummaryFromRecord(record *siterouter.OutboxRoutePlanRecord) *RoutePlanSummary {
 	return &RoutePlanSummary{
 		QueueID:            record.QueueID,
 		RouteStatus:        record.RouteStatus,
@@ -325,7 +354,7 @@ func (b *siteRouterBackend) OutboxRoutePlan(ctx context.Context, queueID int64) 
 		RouteReason:        record.RouteReason,
 		PayloadFit:         record.PayloadFit,
 		Detail:             record.Detail,
-	}, nil
+	}
 }
 
 func (b *siteRouterBackend) UpsertManifest(ctx context.Context, hardwareID string, manifest *contracts.Manifest) error {
@@ -334,6 +363,10 @@ func (b *siteRouterBackend) UpsertManifest(ctx context.Context, hardwareID strin
 
 func (b *siteRouterBackend) UpsertLease(ctx context.Context, hardwareID string, lease *contracts.Lease) error {
 	return b.router.UpsertLease(ctx, hardwareID, lease)
+}
+
+func (b *siteRouterBackend) RegisterDevice(ctx context.Context, hardwareID string, manifest *contracts.Manifest, lease *contracts.Lease) error {
+	return b.router.RegisterDevice(ctx, hardwareID, manifest, lease)
 }
 
 func (b *siteRouterBackend) CommandState(ctx context.Context, commandID string) (string, error) {

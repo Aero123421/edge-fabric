@@ -90,6 +90,26 @@ func TestOpenLocalSiteExposesUsableExternalEntryPoint(t *testing.T) {
 
 func TestIssueCommandOnlyAllocatesTokenForCompactRoute(t *testing.T) {
 	client := openClient(t)
+	if err := client.RegisterManifest(context.Background(), "powered-node-01", &contracts.Manifest{
+		HardwareID:          "powered-node-01",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "mains_powered",
+		WakeClass:           "always_on",
+		SupportedBearers:    []string{"wifi"},
+		AllowedNetworkRoles: []string{"powered_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RegisterLease(context.Background(), "powered-node-01", &contracts.Lease{
+		RoleLeaseID:      "lease-powered-node-01",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-powered-node-01",
+		EffectiveRole:    "powered_leaf",
+		PrimaryBearer:    "wifi",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	ack, queueID, err := client.IssueCommand(context.Background(), "powered-node-01", map[string]any{
 		"command_name": "relay.set",
 		"on":           true,

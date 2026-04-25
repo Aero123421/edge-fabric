@@ -330,6 +330,26 @@ func (b *SleepyCommandBuilder) SendResult(ctx context.Context) (*SendResult, err
 	return result, nil
 }
 
+func (b *SleepyCommandBuilder) Explain(ctx context.Context) (*SendResult, error) {
+	envelope, options, err := b.commandEnvelope()
+	if err != nil {
+		return nil, err
+	}
+	route, err := b.client.low.ExplainRoute(ctx, envelope)
+	if err != nil {
+		return nil, classifyFabricError(err)
+	}
+	result := &SendResult{
+		MessageID: envelope.MessageID,
+		CommandID: options.CommandID,
+	}
+	applyRouteSummary(result, route)
+	if err := routeStatusError(result); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
 func RegisterDeviceProfile(ctx context.Context, client *Client, hardwareID string, profile DeviceProfile, shortID int, opts ...RegistrationOption) error {
 	registration := DeviceRegistration{
 		HardwareID: hardwareID,
@@ -362,11 +382,8 @@ func RegisterDevice(ctx context.Context, client *Client, registration DeviceRegi
 		AllowedNetworkRoles: append([]string(nil), profile.AllowedRoles...),
 		Firmware:            map[string]any{"device_profile": profile.ID},
 	}
-	if err := client.low.RegisterManifest(ctx, registration.HardwareID, manifest); err != nil {
-		return err
-	}
 	if len(profile.AllowedRoles) == 0 || len(profile.SupportedBearers) == 0 {
-		return nil
+		return client.low.RegisterDevice(ctx, registration.HardwareID, manifest, nil)
 	}
 	role := registration.Role
 	if role == "" {
@@ -391,7 +408,7 @@ func RegisterDevice(ctx context.Context, client *Client, registration DeviceRegi
 	if registration.ShortID > 0 {
 		lease.FabricShortID = &registration.ShortID
 	}
-	return client.low.RegisterLease(ctx, registration.HardwareID, lease)
+	return client.low.RegisterDevice(ctx, registration.HardwareID, manifest, lease)
 }
 
 func cloneJSON(payload JSON) JSON {
@@ -427,6 +444,78 @@ func routeStatusError(result *SendResult) error {
 		return errors.Join(base, reason, fmt.Errorf("%s: %s", result.RouteStatus, result.RouteReason))
 	}
 	return errors.Join(base, fmt.Errorf("%s: %s", result.RouteStatus, result.RouteReason))
+}
+
+func (b *SleepyCommandBuilder) commandEnvelope() (*contracts.Envelope, sdk.CommandOptions, error) {
+	if b == nil || b.client == nil || b.client.low == nil {
+		return nil, sdk.CommandOptions{}, fmt.Errorf("fabric sleepy command builder is not attached to a client")
+	}
+	if b.target == "" {
+		return nil, sdk.CommandOptions{}, fmt.Errorf("sleepy command target is required")
+	}
+	if b.payload["command_name"] == nil {
+		return nil, sdk.CommandOptions{}, fmt.Errorf("sleepy command requires a command builder method")
+	}
+	options := sdk.CommandOptions{
+		CommandID:        b.commandID,
+		ServiceLevel:     "eventual_next_poll",
+		ExpectedDelivery: "next_poll",
+		RouteClass:       "sleepy_tiny_control",
+		Priority:         "control",
+	}
+	if options.CommandID == "" {
+		options.CommandID = fmt.Sprintf("cmd-%s-%d", b.target, time.Now().UTC().UnixNano())
+	}
+	if b.expiresIn > 0 {
+		options.ExpiresAt = time.Now().UTC().Add(b.expiresIn)
+	}
+	delivery := &contracts.DeliverySpec{RouteClass: options.RouteClass}
+	if !options.ExpiresAt.IsZero() {
+		delivery.ExpiresAt = options.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	payload := cloneJSON(b.payload)
+	payload["service_level"] = options.ServiceLevel
+	payload["expected_delivery"] = options.ExpectedDelivery
+	if _, ok := payload["command_token"]; !ok {
+		payload["command_token"] = 1
+	}
+	envelope := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     fmt.Sprintf("msg-explain-%d", time.Now().UTC().UnixNano()),
+		Kind:          "command",
+		Priority:      options.Priority,
+		CommandID:     options.CommandID,
+		OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),
+		Source:        contracts.SourceRef{HardwareID: b.client.lowSourceID()},
+		Target:        contracts.TargetRef{Kind: "node", Value: b.target},
+		Delivery:      delivery,
+		Payload:       map[string]any(payload),
+	}
+	return envelope, options, nil
+}
+
+func (c *Client) lowSourceID() string {
+	if c == nil || c.low == nil {
+		return "fabric-client"
+	}
+	return c.low.SourceID()
+}
+
+func applyRouteSummary(result *SendResult, route *sdk.RoutePlanSummary) {
+	if result == nil || route == nil {
+		return
+	}
+	result.QueueID = route.QueueID
+	result.RouteStatus = route.RouteStatus
+	result.SelectedBearer = route.SelectedBearer
+	result.SelectedGatewayID = route.SelectedGatewayID
+	result.NextHopID = route.NextHopID
+	result.FinalTargetID = route.FinalTargetID
+	result.NextHopShortID = route.NextHopShortID
+	result.FinalTargetShortID = route.FinalTargetShortID
+	result.RouteReason = route.RouteReason
+	result.PayloadFit = route.PayloadFit
+	result.ReadyToSend = route.RouteStatus == "ready_to_send"
 }
 
 func classifyFabricError(err error) error {

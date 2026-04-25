@@ -15,6 +15,7 @@ import (
 	"github.com/Aero123421/edge-fabric/internal/protocol/usbcdc"
 	"github.com/Aero123421/edge-fabric/internal/siterouter"
 	"github.com/Aero123421/edge-fabric/pkg/contracts"
+	"github.com/Aero123421/edge-fabric/pkg/fabric"
 )
 
 func main() {
@@ -49,6 +50,8 @@ func run(args []string) error {
 				"edge-fabric explain-route -seed-fixtures -fixture contracts/fixtures/command-sleepy-threshold-set.json",
 				"edge-fabric queue-metrics",
 				"edge-fabric list-heartbeats",
+				"edge-fabric issue-command -seed-fixtures -fixture contracts/fixtures/command-sleepy-threshold-set.json",
+				"edge-fabric describe-profile -profile motion_sensor_battery_v1",
 				"edge-fabric decode-onair -hex <hex-frame>",
 				"edge-fabric decode-usb-frame -hex <hex-frame>",
 				"edge-fabric compact -dry-run",
@@ -64,6 +67,10 @@ func run(args []string) error {
 		return compact(args[1:])
 	case "explain-route":
 		return explainRoute(args[1:])
+	case "issue-command":
+		return issueCommand(args[1:])
+	case "describe-profile":
+		return describeProfile(args[1:])
 	case "decode-onair":
 		return decodeOnAir(args[1:])
 	case "decode-usb-frame":
@@ -74,7 +81,7 @@ func run(args []string) error {
 }
 
 func usage() error {
-	return fmt.Errorf("usage: edge-fabric doctor | seed-fixtures [-db site-router.db] [-max-retry n] | queue-metrics [-db site-router.db] [-max-retry n] | list-heartbeats [-db site-router.db] [-subject-kind kind] [-limit n] [-max-retry n] | compact [-db site-router.db] [-dry-run] [-heartbeat-days n] [-radio-hours n] [-dead-queue-days n] [-file-chunk-days n] [-max-retry n] | explain-route -fixture <envelope.json> [-seed-fixtures|-manifest file -lease file] [-db site-router.db] [-strict] [-max-retry n] | decode-onair -hex <hex-frame> | decode-usb-frame -hex <hex-frame>")
+	return fmt.Errorf("usage: edge-fabric doctor | seed-fixtures [-db site-router.db] [-max-retry n] | queue-metrics [-db site-router.db] [-max-retry n] | list-heartbeats [-db site-router.db] [-subject-kind kind] [-limit n] [-max-retry n] | compact [-db site-router.db] [-dry-run] [-heartbeat-days n] [-radio-hours n] [-dead-queue-days n] [-file-chunk-days n] [-max-retry n] | explain-route -fixture <envelope.json> [-seed-fixtures|-manifest file -lease file] [-db site-router.db] [-strict] [-max-retry n] | issue-command -fixture <envelope.json> [-seed-fixtures|-manifest file -lease file] [-db site-router.db] [-max-retry n] | describe-profile -profile <profile_id> | decode-onair -hex <hex-frame> | decode-usb-frame -hex <hex-frame>")
 }
 
 func seedFixtures(args []string) error {
@@ -259,6 +266,146 @@ func explainRoute(args []string) error {
 		return fmt.Errorf("route is not sendable: %s", plan.Reason)
 	}
 	return nil
+}
+
+func issueCommand(args []string) error {
+	fs := flag.NewFlagSet("issue-command", flag.ContinueOnError)
+	dbPath := fs.String("db", "site-router.db", "SQLite database path")
+	fixturePath := fs.String("fixture", "", "command envelope fixture path")
+	seedBuiltIns := fs.Bool("seed-fixtures", false, "seed built-in sleepy manifest/lease fixtures before issuing")
+	manifestPath := fs.String("manifest", "", "raw manifest fixture to upsert before issuing")
+	leasePath := fs.String("lease", "", "raw lease fixture to upsert for the envelope target before issuing")
+	ingressID := fs.String("ingress-id", "edge-fabric-cli", "ingress id")
+	maxRetry := fs.Int("max-retry", 3, "max outbound retry count")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *fixturePath == "" {
+		return fmt.Errorf("-fixture is required")
+	}
+	envelope, err := contracts.LoadEnvelope(*fixturePath)
+	if err != nil {
+		return err
+	}
+	if envelope.Kind != "command" {
+		return fmt.Errorf("issue-command requires fixture kind=command")
+	}
+	router, err := siterouter.Open(*dbPath, *maxRetry)
+	if err != nil {
+		return err
+	}
+	defer router.Close()
+	ctx := context.Background()
+	seeded, err := prepareRouteContext(ctx, router, envelope, *seedBuiltIns, *manifestPath, *leasePath)
+	if err != nil {
+		return err
+	}
+	ack, queueID, err := router.IssueCommand(ctx, envelope, *ingressID, "")
+	if err != nil {
+		plan, planErr := router.PlanOutboundRouteSummary(ctx, envelope)
+		output := map[string]any{
+			"message_id": envelope.MessageID,
+			"command_id": envelope.CommandID,
+			"target":     envelope.Target,
+			"seeded":     seeded,
+			"error":      err.Error(),
+		}
+		if planErr == nil && plan != nil {
+			output["route"] = plan
+		}
+		if outputErr := printJSON(output); outputErr != nil {
+			return outputErr
+		}
+		return err
+	}
+	route, err := router.OutboxRoutePlan(ctx, queueID)
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{
+		"db_path":  *dbPath,
+		"seeded":   seeded,
+		"ack":      ack,
+		"queue_id": queueID,
+		"route":    route,
+	})
+}
+
+func describeProfile(args []string) error {
+	fs := flag.NewFlagSet("describe-profile", flag.ContinueOnError)
+	profileID := fs.String("profile", "", "profile id")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	profiles := []fabric.DeviceProfile{
+		fabric.MotionSensorBatteryProfile(),
+		fabric.LeakSensorSleepyProfile(),
+		fabric.PoweredServoControllerProfile(),
+	}
+	if *profileID == "" {
+		return printJSON(map[string]any{"profiles": profiles})
+	}
+	for _, profile := range profiles {
+		if profile.ID == *profileID {
+			return printJSON(map[string]any{
+				"profile": profile,
+				"safety":  profileSafety(profile),
+			})
+		}
+	}
+	return fmt.Errorf("unknown profile %s", *profileID)
+}
+
+func prepareRouteContext(
+	ctx context.Context,
+	router *siterouter.Router,
+	envelope *contracts.Envelope,
+	seedBuiltIns bool,
+	manifestPath string,
+	leasePath string,
+) ([]string, error) {
+	var seeded []string
+	if seedBuiltIns {
+		items, err := devfixtures.SeedBuiltIn(ctx, router, ".")
+		if err != nil {
+			return nil, err
+		}
+		seeded = append(seeded, items...)
+	}
+	if manifestPath != "" {
+		manifest, err := devfixtures.LoadManifest(manifestPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := router.UpsertManifest(ctx, manifest.HardwareID, manifest); err != nil {
+			return nil, err
+		}
+		seeded = append(seeded, "manifest:"+manifest.HardwareID)
+	}
+	if leasePath != "" {
+		if envelope.Target.Kind != "node" || envelope.Target.Value == "" {
+			return nil, fmt.Errorf("-lease requires an envelope with node target")
+		}
+		lease, err := devfixtures.LoadLease(leasePath)
+		if err != nil {
+			return nil, err
+		}
+		if err := router.UpsertLease(ctx, envelope.Target.Value, lease); err != nil {
+			return nil, err
+		}
+		seeded = append(seeded, "lease:"+envelope.Target.Value)
+	}
+	return seeded, nil
+}
+
+func profileSafety(profile fabric.DeviceProfile) map[string]any {
+	return map[string]any{
+		"allowed_roles":     profile.AllowedRoles,
+		"supported_bearers": profile.SupportedBearers,
+		"default_routes":    profile.DefaultRoutes,
+		"forbidden":         profile.Forbidden,
+		"summary":           "profile constrains unsafe role/bearer combinations before routing",
+	}
 }
 
 func decodeOnAir(args []string) error {

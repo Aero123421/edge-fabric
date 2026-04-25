@@ -279,6 +279,9 @@ func (r *Router) init(ctx context.Context) error {
 			command_id TEXT PRIMARY KEY,
 			command_token INTEGER,
 			command_token_scope TEXT NOT NULL DEFAULT '',
+			command_token_epoch TEXT NOT NULL DEFAULT '',
+			command_token_valid_from TEXT,
+			command_token_valid_until TEXT,
 			message_id TEXT NOT NULL UNIQUE,
 			state TEXT NOT NULL,
 			envelope_json TEXT NOT NULL,
@@ -411,6 +414,9 @@ func (r *Router) ensureOperationalSchema(ctx context.Context) error {
 		def   string
 	}{
 		{"command_ledger", `command_token_scope TEXT NOT NULL DEFAULT ''`},
+		{"command_ledger", `command_token_epoch TEXT NOT NULL DEFAULT ''`},
+		{"command_ledger", `command_token_valid_from TEXT`},
+		{"command_ledger", `command_token_valid_until TEXT`},
 		{"heartbeat_ledger", `subject_kind TEXT`},
 		{"heartbeat_ledger", `subject_id TEXT`},
 		{"outbox_queue", `route_status TEXT NOT NULL DEFAULT 'route_pending'`},
@@ -428,6 +434,9 @@ func (r *Router) ensureOperationalSchema(ctx context.Context) error {
 	if _, err := r.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_command_ledger_command_token`); err != nil {
 		return err
 	}
+	if _, err := r.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_command_ledger_command_token_scope`); err != nil {
+		return err
+	}
 	if _, err := r.db.ExecContext(ctx, `
 		UPDATE command_ledger
 		SET command_token_scope = COALESCE(json_extract(envelope_json, '$.target.value'), '')
@@ -438,8 +447,8 @@ func (r *Router) ensureOperationalSchema(ctx context.Context) error {
 		return err
 	}
 	_, err := r.db.ExecContext(ctx, `
-		CREATE UNIQUE INDEX IF NOT EXISTS idx_command_ledger_command_token_scope
-		ON command_ledger(command_token_scope, command_token)
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_command_ledger_command_token_scope_epoch
+		ON command_ledger(command_token_scope, command_token_epoch, command_token)
 		WHERE command_token IS NOT NULL
 	`)
 	return err
@@ -527,10 +536,17 @@ func (r *Router) Ingest(ctx context.Context, envelope *contracts.Envelope, ingre
 		if envelope.CommandID != "" {
 			commandToken := payloadInt64(envelope.Payload, "command_token")
 			commandTokenScope := commandTokenScopeForEnvelope(envelope)
+			commandTokenEpoch := commandTokenEpochForEnvelope(envelope)
+			commandTokenValidFrom, commandTokenValidUntil := commandTokenValidityForEnvelope(envelope)
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO command_ledger (command_id, command_token, command_token_scope, message_id, state, envelope_json, created_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?)
-			`, envelope.CommandID, nullableInt64(commandToken), commandTokenScope, envelope.MessageID, "issued", string(rawEnvelope), persistedAt); err != nil {
+				INSERT INTO command_ledger (
+					command_id, command_token, command_token_scope, command_token_epoch,
+					command_token_valid_from, command_token_valid_until,
+					message_id, state, envelope_json, created_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`, envelope.CommandID, nullableInt64(commandToken), commandTokenScope, commandTokenEpoch,
+				nullableString(commandTokenValidFrom), nullableString(commandTokenValidUntil),
+				envelope.MessageID, "issued", string(rawEnvelope), persistedAt); err != nil {
 				if isConstraintError(err) {
 					_ = tx.Rollback()
 					return r.ingestDuplicateAck(ctx, envelope)
@@ -879,6 +895,9 @@ func (r *Router) upsertHeartbeatEnvelope(
 	ingressID string,
 	updatedAt string,
 ) error {
+	if err := validateHeartbeatSubject(envelope); err != nil {
+		return err
+	}
 	heartbeatKey := heartbeatKeyForEnvelope(envelope)
 	subjectKind := heartbeatSubjectKind(envelope)
 	subjectID := heartbeatSubjectID(envelope)
@@ -1102,6 +1121,33 @@ func (r *Router) UpsertLease(ctx context.Context, hardwareID string, lease *cont
 	return tx.Commit()
 }
 
+func (r *Router) RegisterDevice(ctx context.Context, hardwareID string, manifest *contracts.Manifest, lease *contracts.Lease) error {
+	if manifest == nil {
+		return errors.New("manifest is required")
+	}
+	if hardwareID == "" {
+		hardwareID = manifest.HardwareID
+	}
+	if hardwareID == "" {
+		return errors.New("hardware_id is required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := r.upsertManifestTx(ctx, tx, hardwareID, manifest, updatedAt); err != nil {
+		return err
+	}
+	if lease != nil {
+		if err := r.upsertLeaseTx(ctx, tx, hardwareID, lease, updatedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (r *Router) RuntimeInfoForNode(ctx context.Context, hardwareID string) (*NodeRuntimeInfo, error) {
 	return runtimeInfoForNode(ctx, r.db, hardwareID)
 }
@@ -1164,6 +1210,8 @@ func (r *Router) ResolveCommandIDByTokenForTarget(ctx context.Context, targetHar
 		err = r.db.QueryRowContext(ctx, `
 			SELECT command_id FROM command_ledger
 			WHERE command_token_scope = ? AND command_token = ?
+			ORDER BY created_at DESC
+			LIMIT 1
 		`, targetHardwareID, int(token)).Scan(&commandID)
 	} else {
 		err = r.db.QueryRowContext(ctx, `
@@ -1217,6 +1265,13 @@ func (r *Router) IssueCommand(ctx context.Context, envelope *contracts.Envelope,
 	if err != nil {
 		return nil, 0, err
 	}
+	if status := routeStatusForPlan(plan); status != "ready_to_send" {
+		reason := "route_pending"
+		if plan != nil && plan.Reason != "" {
+			reason = plan.Reason
+		}
+		return nil, 0, contracts.NewValidationError("command route is not sendable: status=%s reason=%s", status, reason)
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO messages (
 			message_id, kind, dedupe_key, event_id, command_id, occurred_at,
@@ -1234,10 +1289,17 @@ func (r *Router) IssueCommand(ctx context.Context, envelope *contracts.Envelope,
 	if envelope.CommandID != "" {
 		commandToken := payloadInt64(envelope.Payload, "command_token")
 		commandTokenScope := commandTokenScopeForEnvelope(envelope)
+		commandTokenEpoch := commandTokenEpochForEnvelope(envelope)
+		commandTokenValidFrom, commandTokenValidUntil := commandTokenValidityForEnvelope(envelope)
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO command_ledger (command_id, command_token, command_token_scope, message_id, state, envelope_json, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, envelope.CommandID, nullableInt64(commandToken), commandTokenScope, envelope.MessageID, "issued", string(rawEnvelope), persistedAt); err != nil {
+			INSERT INTO command_ledger (
+				command_id, command_token, command_token_scope, command_token_epoch,
+				command_token_valid_from, command_token_valid_until,
+				message_id, state, envelope_json, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, envelope.CommandID, nullableInt64(commandToken), commandTokenScope, commandTokenEpoch,
+			nullableString(commandTokenValidFrom), nullableString(commandTokenValidUntil),
+			envelope.MessageID, "issued", string(rawEnvelope), persistedAt); err != nil {
 			if isConstraintError(err) {
 				_ = tx.Rollback()
 				ack, dupErr := r.ingestDuplicateAck(ctx, envelope)
@@ -1266,6 +1328,31 @@ func (r *Router) validateOutboundEnvelope(ctx context.Context, envelope *contrac
 
 func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Envelope) (*RoutePlan, error) {
 	return r.planOutboundRoute(ctx, envelope, r.RuntimeInfoForNode)
+}
+
+func (r *Router) PlanOutboundRouteSummary(ctx context.Context, envelope *contracts.Envelope) (*OutboxRoutePlanRecord, error) {
+	plan, err := r.PlanOutboundRoute(ctx, envelope)
+	if err != nil {
+		return nil, err
+	}
+	record := &OutboxRoutePlanRecord{
+		RouteStatus: routeStatusForPlan(plan),
+		PayloadFit:  false,
+		RoutePlan:   plan,
+		Detail:      map[string]any{},
+	}
+	if plan != nil {
+		record.SelectedBearer = plan.Bearer
+		record.SelectedGatewayID = plan.GatewayID
+		record.RouteReason = plan.Reason
+		record.PayloadFit = plan.PayloadFit
+		record.Detail = plan.Detail
+		record.NextHopID = plan.NextHopID
+		record.FinalTargetID = plan.FinalTargetID
+		record.NextHopShortID = plan.NextHopShortID
+		record.FinalTargetShortID = plan.FinalTargetShortID
+	}
+	return record, nil
 }
 
 func (r *Router) planOutboundRoute(ctx context.Context, envelope *contracts.Envelope, lookup nodeRuntimeLookup) (*RoutePlan, error) {
@@ -1913,7 +2000,47 @@ func (r *Router) queueRouteStatusMetrics(ctx context.Context) (map[string]int64,
 		}
 		metrics[item.key] = ageMS
 	}
-	return metrics, nil
+	reasonRows, err := r.db.QueryContext(ctx, `
+		SELECT COALESCE(route_status, 'route_pending'), COALESCE(NULLIF(route_reason, ''), 'unknown'), COUNT(*)
+		FROM outbox_queue
+		WHERE status = 'queued'
+		GROUP BY route_status, route_reason
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer reasonRows.Close()
+	for reasonRows.Next() {
+		var routeStatus string
+		var reason string
+		var count int64
+		if err := reasonRows.Scan(&routeStatus, &reason, &count); err != nil {
+			return nil, err
+		}
+		metrics["queued_"+metricToken(routeStatus)+"_reason_"+metricToken(reason)+"_count"] = count
+	}
+	if err := reasonRows.Err(); err != nil {
+		return nil, err
+	}
+	deadRows, err := r.db.QueryContext(ctx, `
+		SELECT COALESCE(NULLIF(dead_reason, ''), 'unknown'), COUNT(*)
+		FROM outbox_queue
+		WHERE status = 'dead'
+		GROUP BY dead_reason
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer deadRows.Close()
+	for deadRows.Next() {
+		var reason string
+		var count int64
+		if err := deadRows.Scan(&reason, &count); err != nil {
+			return nil, err
+		}
+		metrics["dead_reason_"+metricToken(reason)+"_count"] = count
+	}
+	return metrics, deadRows.Err()
 }
 
 func (r *Router) PendingCommandDigest(ctx context.Context, targetHardwareID string, now time.Time) (*PendingCommandDigest, error) {
@@ -2814,6 +2941,9 @@ func commandQueueKey(envelope *contracts.Envelope, queueKey string) string {
 }
 
 func payloadDeclaredBytes(payload map[string]any) int {
+	if !payloadBool(payload, "allow_declared_lora_size_for_alpha") {
+		return 0
+	}
 	for _, key := range []string{"payload_bytes", "body_bytes", "summary_bytes", "compact_bytes"} {
 		if value := payloadInt64(payload, key); value != nil && *value > 0 && *value <= int64(^uint(0)>>1) {
 			return int(*value)
@@ -2841,7 +2971,7 @@ func compactPayloadBodyBytes(envelope *contracts.Envelope) (int, string) {
 		}
 	}
 	if declared := payloadDeclaredBytes(envelope.Payload); declared > 0 {
-		return declared, "declared_alpha"
+		return declared, "declared_alpha_opt_in"
 	}
 	return 0, ""
 }
@@ -2933,6 +3063,31 @@ func boolToInt(value bool) int {
 	return 0
 }
 
+func metricToken(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "unknown"
+	}
+	var builder strings.Builder
+	lastUnderscore := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			builder.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	result := strings.Trim(builder.String(), "_")
+	if result == "" {
+		return "unknown"
+	}
+	return result
+}
+
 func cloneMap(value map[string]any) map[string]any {
 	if value == nil {
 		return map[string]any{}
@@ -2957,6 +3112,29 @@ func heartbeatKeyForEnvelope(envelope *contracts.Envelope) string {
 	return subjectKind + ":" + envelope.Source.HardwareID
 }
 
+func validateHeartbeatSubject(envelope *contracts.Envelope) error {
+	if envelope == nil || envelope.Kind != "heartbeat" {
+		return nil
+	}
+	if !payloadBool(envelope.Payload, "production") && !payloadBool(envelope.Payload, "strict_subject") {
+		return nil
+	}
+	subjectKind := payloadString(envelope.Payload, "subject_kind")
+	subjectID := payloadString(envelope.Payload, "subject_id")
+	if subjectKind == "" || subjectID == "" {
+		return contracts.NewValidationError("production heartbeat requires subject_kind and subject_id")
+	}
+	switch subjectKind {
+	case "gateway", "node", "host_agent", "relay":
+	default:
+		return contracts.NewValidationError("production heartbeat subject_kind %q is not supported", subjectKind)
+	}
+	if gatewayID := payloadString(envelope.Payload, "gateway_id"); gatewayID != "" && subjectKind == "gateway" && gatewayID != subjectID {
+		return contracts.NewValidationError("gateway heartbeat subject_id must match gateway_id")
+	}
+	return nil
+}
+
 func heartbeatSubjectID(envelope *contracts.Envelope) string {
 	if subjectID := payloadString(envelope.Payload, "subject_id"); subjectID != "" {
 		return subjectID
@@ -2979,7 +3157,7 @@ func heartbeatSubjectKind(envelope *contracts.Envelope) string {
 	}
 	status := payloadString(envelope.Payload, "status")
 	switch status {
-	case "lora_ingress", "live", "radio_tx_queued", "hop_buffered", "radio_handoff_accepted":
+	case "lora_ingress", "radio_tx_queued", "hop_buffered", "radio_handoff_accepted":
 		return "gateway"
 	default:
 		return "node"
@@ -3040,11 +3218,41 @@ func commandTokenScopeForEnvelope(envelope *contracts.Envelope) string {
 	return envelope.Target.Value
 }
 
+func commandTokenEpochForEnvelope(envelope *contracts.Envelope) string {
+	if envelope == nil {
+		return ""
+	}
+	if epoch := payloadString(envelope.Payload, "command_window_id"); epoch != "" {
+		return epoch
+	}
+	if epoch := payloadString(envelope.Payload, "lease_epoch"); epoch != "" {
+		return epoch
+	}
+	if envelope.Delivery != nil && envelope.Delivery.ExpiresAt != "" {
+		return "expires:" + envelope.Delivery.ExpiresAt
+	}
+	return ""
+}
+
+func commandTokenValidityForEnvelope(envelope *contracts.Envelope) (string, string) {
+	if envelope == nil || envelope.Delivery == nil {
+		return "", ""
+	}
+	return envelope.OccurredAt, envelope.Delivery.ExpiresAt
+}
+
 func nullableInt64(value *int64) any {
 	if value == nil {
 		return nil
 	}
 	return *value
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func nullableInt(value *int) any {
