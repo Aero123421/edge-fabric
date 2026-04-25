@@ -394,6 +394,50 @@ class ContractTests(unittest.TestCase):
         for profile_id in profiles:
             self.assertIn(profile_id, fabric_source)
 
+    def test_route_class_artifact_matches_go_planner_table(self) -> None:
+        routes = self._load_json("contracts/policy/route-classes.json")["route_classes"]
+        router_source = (ROOT / "internal" / "siterouter" / "router.go").read_text(
+            encoding="utf-8"
+        )
+
+        runtime_routes = {
+            "sleepy_tiny_control": ["lora_direct"],
+            "maintenance_sync": ["ble_maintenance"],
+        }
+        pattern = re.compile(
+            r'case "([^"]+)":\s*'
+            r'return r\.planPolicyRoute\(envelope, plan, info, "([^"]+)", '
+            r'\[\]string\{([^}]*)\}, (true|false)\)',
+            re.MULTILINE,
+        )
+        for route_case, route_arg, allowed_expr, allow_lora in pattern.findall(router_source):
+            self.assertEqual(route_case, route_arg)
+            allowed = re.findall(r'"([^"]+)"', allowed_expr)
+            runtime_routes[route_case] = allowed
+            self.assertEqual("lora_direct" in allowed, allow_lora == "true")
+
+        self.assertEqual(set(routes), set(runtime_routes))
+        for route_class, policy in routes.items():
+            self.assertEqual(policy["allowed_bearers"], runtime_routes[route_class])
+
+    def test_role_policy_artifact_matches_go_always_on_roles(self) -> None:
+        roles = self._load_json("contracts/policy/role-policy.json")["roles"]
+        router_source = (ROOT / "internal" / "siterouter" / "router.go").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r"func leaseRoleRequiresAlwaysOn\(role string\) bool \{.*?"
+            r"switch role \{(?P<body>.*?)default:",
+            router_source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        runtime_roles = set(re.findall(r'"([^"]+)"', match.group("body")))
+        artifact_roles = {
+            role for role, policy in roles.items() if policy["requires_always_on"]
+        }
+        self.assertEqual(artifact_roles, runtime_roles)
+
 
 if __name__ == "__main__":
     unittest.main()

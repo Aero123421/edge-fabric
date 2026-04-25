@@ -2,6 +2,7 @@
   "version": "1.0.0",
   "profiles": {
     "motion_sensor_battery_v1": {
+      "device_family": "xiao-esp32s3-sx1262",
       "power_class": "primary_battery",
       "wake_class": "sleepy_event",
       "allowed_roles": ["sleepy_leaf"],
@@ -18,6 +19,7 @@
       }
     },
     "leak_sensor_sleepy_v1": {
+      "device_family": "xiao-esp32s3-sx1262",
       "power_class": "primary_battery",
       "wake_class": "sleepy_event",
       "allowed_roles": ["sleepy_leaf"],
@@ -34,6 +36,7 @@
       }
     },
     "servo_controller_powered_v1": {
+      "device_family": "xiao-esp32s3-sx1262",
       "power_class": "mains_powered",
       "wake_class": "always_on",
       "allowed_roles": ["powered_leaf"],

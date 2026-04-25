@@ -15,6 +15,27 @@
       "may_wifi_mesh_route": false,
       "may_lora_relay": false
     },
+    "mesh_router": {
+      "requires_always_on": true,
+      "may_deep_sleep": false,
+      "may_relay": true,
+      "may_wifi_mesh_route": true,
+      "may_lora_relay": false
+    },
+    "mesh_root": {
+      "requires_always_on": true,
+      "may_deep_sleep": false,
+      "may_relay": true,
+      "may_wifi_mesh_route": true,
+      "may_lora_relay": true
+    },
+    "ack_owner": {
+      "requires_always_on": true,
+      "may_deep_sleep": false,
+      "may_relay": false,
+      "may_wifi_mesh_route": false,
+      "may_lora_relay": false
+    },
     "lora_relay": {
       "requires_always_on": true,
       "may_deep_sleep": false,

@@ -113,11 +113,13 @@ PowerShell:
 go test ./...
 python .\scripts\doctor.py --require-go
 go run .\cmd\site-router -op doctor
-go run .\cmd\site-router -op issue-command -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
-go run .\cmd\site-router -op pending-digest -hardware-id <leaf-hardware-id>
+go run .\cmd\site-router -op seed-fixtures
+go run .\cmd\site-router -op issue-command -seed-fixtures -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
+go run .\cmd\site-router -op pending-digest -hardware-id battery-leaf-01
 go run .\cmd\edge-fabric doctor
-go run .\cmd\edge-fabric explain-route -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
+go run .\cmd\edge-fabric explain-route -seed-fixtures -fixture .\contracts\fixtures\command-sleepy-threshold-set.json
 go run .\cmd\edge-fabric decode-onair -hex <hex-frame>
+go run .\cmd\edge-fabric decode-usb-frame -hex <hex-frame>
 go run .\cmd\host-agent -mode direct-json -input .\contracts\fixtures\event-battery-alert.json
 go run .\cmd\host-agent -mode diagnostics
 go run .\cmd\direct-slice-demo
@@ -130,8 +132,10 @@ Bash:
 go test ./...
 python ./scripts/doctor.py --require-go
 go run ./cmd/site-router -op doctor
+go run ./cmd/site-router -op seed-fixtures
+go run ./cmd/site-router -op issue-command -seed-fixtures -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
 go run ./cmd/edge-fabric doctor
-go run ./cmd/edge-fabric explain-route -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
+go run ./cmd/edge-fabric explain-route -seed-fixtures -fixture ./contracts/fixtures/command-sleepy-threshold-set.json
 go run ./cmd/direct-slice-demo
 go run ./cmd/sleepy-cycle-demo
 ```
@@ -153,6 +157,15 @@ _, err = client.PublishState(ctx, fabric.State{
 ```
 
 外向き SDK は `pkg/fabric` を優先します。`pkg/sdk` の mainline entrypoint は `OpenLocalSite()` / public `ClientBackend` で、`internal/siterouter` は実装詳細です。
+
+Runnable examples:
+
+```bash
+go run ./examples/01-basic-state
+go run ./examples/02-critical-event
+```
+
+These examples use temporary local SQLite databases and do not require hardware.
 
 ### Python reference
 

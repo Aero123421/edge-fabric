@@ -1246,8 +1246,15 @@ func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Enve
 		}
 		return plan, nil
 	}
+	applyRouteClassDefaults(plan, envelope.Delivery)
 	switch plan.RouteClass {
 	case "sleepy_tiny_control":
+		if info.Manifest != nil && !manifestAllowsBearer(info.Manifest, "lora") {
+			return nil, contracts.NewValidationError("sleepy_tiny_control requires lora bearer support for target %s", envelope.Target.Value)
+		}
+		if info.Lease != nil && !bearerAllowedByPolicy(bearerLabel(info.Lease), []string{"lora_direct"}, false) {
+			return nil, contracts.NewValidationError("sleepy_tiny_control requires lora_direct-compatible primary bearer for target %s", envelope.Target.Value)
+		}
 		wire, err := planSleepyCompactCommand(envelope, info)
 		if err != nil {
 			return nil, err
@@ -1294,6 +1301,18 @@ func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Enve
 	}
 }
 
+func applyRouteClassDefaults(plan *RoutePlan, delivery *contracts.DeliverySpec) {
+	if plan == nil {
+		return
+	}
+	if delivery == nil || delivery.AllowRedundant == nil {
+		switch plan.RouteClass {
+		case "critical_alert":
+			plan.AllowRedundant = true
+		}
+	}
+}
+
 func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, info *NodeRuntimeInfo, routeClass string, allowedBearers []string, allowLoRaIfRepresentable bool) *RoutePlan {
 	bearer := bearerLabel(nil)
 	if info != nil {
@@ -1308,7 +1327,11 @@ func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, 
 		plan.Detail["allowed_bearers"] = allowedBearers
 		return plan
 	}
-	if !bearerAllowedByPolicy(bearer, allowedBearers) {
+	applyRouteIntentToPlan(plan, bearer)
+	if !plan.PayloadFit {
+		return plan
+	}
+	if !bearerAllowedByPolicy(bearer, allowedBearers, plan.AllowRelay) {
 		plan.PayloadFit = false
 		plan.Reason = "bearer_forbidden_by_route_class"
 		plan.Detail["bearer"] = bearer
@@ -1627,11 +1650,97 @@ func (r *Router) QueueMetrics(ctx context.Context) (map[string]int64, error) {
 		return nil, err
 	}
 	metrics["oldest_queued_age_ms"] = oldestQueuedAgeMS
+	routeMetrics, err := r.queueRouteStatusMetrics(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range routeMetrics {
+		metrics[key] = value
+	}
 	queueAges, err := r.queueAgeSamples(ctx)
 	if err != nil {
 		return nil, err
 	}
 	metrics["queue_lag_p95_ms"] = percentile95(queueAges)
+	return metrics, nil
+}
+
+func (r *Router) queueRouteStatusMetrics(ctx context.Context) (map[string]int64, error) {
+	metrics := map[string]int64{
+		"queued_ready_count":          0,
+		"queued_route_pending_count":  0,
+		"queued_route_blocked_count":  0,
+		"oldest_ready_to_send_age_ms": 0,
+		"oldest_route_pending_age_ms": 0,
+		"oldest_route_blocked_age_ms": 0,
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT COALESCE(route_status, 'route_pending'), COUNT(*)
+		FROM outbox_queue
+		WHERE status = 'queued'
+		GROUP BY route_status
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var routeStatus string
+		var count int64
+		if err := rows.Scan(&routeStatus, &count); err != nil {
+			return nil, err
+		}
+		switch routeStatus {
+		case "ready_to_send":
+			metrics["queued_ready_count"] = count
+		case "route_blocked":
+			metrics["queued_route_blocked_count"] = count
+		default:
+			metrics["queued_route_pending_count"] += count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	crossRows, err := r.db.QueryContext(ctx, `
+		SELECT status, COALESCE(route_status, 'route_pending'), COUNT(*)
+		FROM outbox_queue
+		GROUP BY status, route_status
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer crossRows.Close()
+	for crossRows.Next() {
+		var status string
+		var routeStatus string
+		var count int64
+		if err := crossRows.Scan(&status, &routeStatus, &count); err != nil {
+			return nil, err
+		}
+		metrics[status+"_"+routeStatus+"_count"] = count
+	}
+	if err := crossRows.Err(); err != nil {
+		return nil, err
+	}
+	for _, item := range []struct {
+		status string
+		key    string
+	}{
+		{"ready_to_send", "oldest_ready_to_send_age_ms"},
+		{"route_pending", "oldest_route_pending_age_ms"},
+		{"route_blocked", "oldest_route_blocked_age_ms"},
+	} {
+		var ageMS int64
+		if err := r.db.QueryRowContext(ctx, `
+			SELECT COALESCE(CAST((julianday('now') - julianday(MIN(created_at))) * 86400000 AS INTEGER), 0)
+			FROM outbox_queue
+			WHERE status = 'queued' AND route_status = ?
+		`, item.status).Scan(&ageMS); err != nil {
+			return nil, err
+		}
+		metrics[item.key] = ageMS
+	}
 	return metrics, nil
 }
 
@@ -2260,9 +2369,37 @@ func bearerIsLoRa(bearer string) bool {
 	return bearer == "lora" || strings.HasPrefix(bearer, "lora_")
 }
 
-func bearerAllowedByPolicy(bearer string, allowed []string) bool {
+func bearerIsRelay(bearer string) bool {
+	return bearer == "lora_relay" || bearer == "lora_mesh"
+}
+
+func applyRouteIntentToPlan(plan *RoutePlan, bearer string) {
+	if plan == nil {
+		return
+	}
+	plan.Detail["selected_bearer"] = bearer
+	plan.Detail["relay_requested"] = plan.AllowRelay
+	plan.Detail["redundant_requested"] = plan.AllowRedundant
+	if plan.HopLimit != nil {
+		plan.Detail["hop_limit"] = *plan.HopLimit
+		if *plan.HopLimit == 0 && bearerIsRelay(bearer) {
+			plan.PayloadFit = false
+			plan.Reason = "relay_forbidden_by_hop_limit"
+			return
+		}
+	}
+	if bearerIsRelay(bearer) && !plan.AllowRelay {
+		plan.PayloadFit = false
+		plan.Reason = "relay_forbidden_by_delivery_policy"
+	}
+}
+
+func bearerAllowedByPolicy(bearer string, allowed []string, allowRelay bool) bool {
 	for _, candidate := range allowed {
-		if bearer == candidate || manifestBearerName(bearer) == candidate || bearer == manifestBearerName(candidate) {
+		if bearer == candidate {
+			return true
+		}
+		if allowRelay && bearerIsRelay(bearer) && manifestBearerName(bearer) == manifestBearerName(candidate) {
 			return true
 		}
 	}

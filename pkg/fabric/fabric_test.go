@@ -3,6 +3,7 @@ package fabric
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,21 +19,21 @@ func TestFabricOpenLocalPublishStateAndEmitEvent(t *testing.T) {
 	t.Cleanup(func() {
 		_ = client.Close()
 	})
-	if ack, err := client.PublishState(context.Background(), State{
+	if result, err := client.PublishStateResult(context.Background(), State{
 		Source: "temp-fabric-01",
 		Key:    "temperature.c",
 		Value:  24.5,
-	}); err != nil || ack.Status != "persisted" {
-		t.Fatalf("unexpected state result ack=%+v err=%v", ack, err)
+	}); err != nil || result.Status != "persisted" || !result.Persisted {
+		t.Fatalf("unexpected state result result=%+v err=%v", result, err)
 	}
-	if ack, err := client.EmitEvent(context.Background(), Event{
+	if result, err := client.EmitEventResult(context.Background(), Event{
 		EventID:  "evt-fabric-motion-01",
 		Source:   "motion-fabric-01",
 		Type:     EventMotionDetected,
 		Severity: Critical,
 		Bucket:   3,
-	}); err != nil || ack.Status != "persisted" {
-		t.Fatalf("unexpected event result ack=%+v err=%v", ack, err)
+	}); err != nil || result.Status != "persisted" || !result.Persisted {
+		t.Fatalf("unexpected event result result=%+v err=%v", result, err)
 	}
 	first, err := client.EmitEvent(context.Background(), Event{
 		IdempotencyKey: "boot-1:seq-7",
@@ -106,6 +107,23 @@ func TestFabricRejectsOutOfRangeShortID(t *testing.T) {
 	}
 }
 
+func TestSleepyBuilderMapsRouteErrors(t *testing.T) {
+	client, err := OpenLocal(filepath.Join(t.TempDir(), "site.db"), "app-fabric-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+	_, err = client.SleepyCommand("missing-sleepy-node").
+		ThresholdSet(42).
+		CommandID("cmd-missing-lease").
+		SendResult(context.Background())
+	if !errors.Is(err, ErrLeaseMissing) {
+		t.Fatalf("expected ErrLeaseMissing, got %v", err)
+	}
+}
+
 func TestBuiltInProfilesMatchPolicyArtifact(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "contracts", "policy", "device-profiles.json"))
 	if err != nil {
@@ -113,6 +131,7 @@ func TestBuiltInProfilesMatchPolicyArtifact(t *testing.T) {
 	}
 	var artifact struct {
 		Profiles map[string]struct {
+			DeviceFamily     string            `json:"device_family"`
 			PowerClass       string            `json:"power_class"`
 			WakeClass        string            `json:"wake_class"`
 			AllowedRoles     []string          `json:"allowed_roles"`
@@ -133,7 +152,8 @@ func TestBuiltInProfilesMatchPolicyArtifact(t *testing.T) {
 		if !ok {
 			t.Fatalf("profile %s missing from artifact", profile.ID)
 		}
-		if profile.PowerClass != expected.PowerClass ||
+		if profile.DeviceFamily != expected.DeviceFamily ||
+			profile.PowerClass != expected.PowerClass ||
 			profile.WakeClass != expected.WakeClass ||
 			!reflect.DeepEqual(profile.AllowedRoles, expected.AllowedRoles) ||
 			!reflect.DeepEqual(profile.SupportedBearers, expected.SupportedBearers) ||

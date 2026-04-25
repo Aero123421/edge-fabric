@@ -2,7 +2,9 @@ package siterouter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -21,6 +23,156 @@ func openTestRouter(t *testing.T) *Router {
 		_ = router.Close()
 	})
 	return router
+}
+
+type routePolicyArtifact struct {
+	RouteClasses map[string]routePolicySpec `json:"route_classes"`
+}
+
+type routePolicySpec struct {
+	AllowedBearers     []string `json:"allowed_bearers"`
+	RequiresTargetRole []string `json:"requires_target_role"`
+	MaxLoRaBodyBytes   *int     `json:"max_lora_body_bytes"`
+	AllowRelay         bool     `json:"allow_relay"`
+	AllowRedundant     bool     `json:"allow_redundant"`
+}
+
+type rolePolicyArtifact struct {
+	Roles map[string]rolePolicySpec `json:"roles"`
+}
+
+type rolePolicySpec struct {
+	RequiresAlwaysOn bool `json:"requires_always_on"`
+}
+
+func loadRoutePolicyArtifact(t *testing.T) routePolicyArtifact {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "contracts", "policy", "route-classes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifact routePolicyArtifact
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	return artifact
+}
+
+func loadRolePolicyArtifact(t *testing.T) rolePolicyArtifact {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "contracts", "policy", "role-policy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifact rolePolicyArtifact
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	return artifact
+}
+
+func upsertPolicyNode(t *testing.T, router *Router, hardwareID, role, primaryBearer string, shortID *int) {
+	t.Helper()
+	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, hardwareID, &contracts.Manifest{
+		HardwareID:          hardwareID,
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          policyPowerClass(role),
+		WakeClass:           policyWakeClass(role),
+		SupportedBearers:    []string{policyManifestBearerName(primaryBearer)},
+		AllowedNetworkRoles: []string{role},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, hardwareID, &contracts.Lease{
+		RoleLeaseID:      "lease-" + hardwareID,
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-" + hardwareID,
+		FabricShortID:    shortID,
+		EffectiveRole:    role,
+		PrimaryBearer:    primaryBearer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func policyPowerClass(role string) string {
+	if role == "sleepy_leaf" {
+		return "primary_battery"
+	}
+	return "mains_powered"
+}
+
+func policyWakeClass(role string) string {
+	if role == "sleepy_leaf" {
+		return "sleepy_event"
+	}
+	return "always_on"
+}
+
+func policyRoleForRoute(policy routePolicySpec) string {
+	if policyContainsString(policy.RequiresTargetRole, "sleepy_leaf") {
+		return "sleepy_leaf"
+	}
+	return "powered_leaf"
+}
+
+func primaryBearerForPolicyLabel(label string) string {
+	switch label {
+	case "lora_direct":
+		return "lora"
+	default:
+		return label
+	}
+}
+
+func routePolicyEnvelope(routeClass, target string, payloadBytes int) *contracts.Envelope {
+	envelope := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-policy-" + routeClass + "-" + target,
+		Kind:          "fabric_summary",
+		Priority:      "normal",
+		Source:        contracts.SourceRef{HardwareID: "controller-policy"},
+		Target:        contracts.TargetRef{Kind: "node", Value: target},
+		Delivery:      &contracts.DeliverySpec{RouteClass: routeClass},
+		Payload:       map[string]any{"payload_bytes": payloadBytes},
+	}
+	if routeClass == "sleepy_tiny_control" {
+		envelope.Kind = "command"
+		envelope.Priority = "control"
+		envelope.CommandID = "cmd-policy-" + target
+		envelope.Payload = map[string]any{
+			"command_name":  "threshold.set",
+			"command_token": 0x1201,
+			"value":         42,
+		}
+	}
+	return envelope
+}
+
+func routePolicyAllowsBearer(policy routePolicySpec, bearer string) bool {
+	return policyContainsString(policy.AllowedBearers, bearer)
+}
+
+func policyContainsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func policyManifestBearerName(bearer string) string {
+	switch bearer {
+	case "lora_direct", "lora_relay", "lora_mesh":
+		return "lora"
+	case "wifi_ip", "wifi_mesh", "wifi_lr":
+		return "wifi"
+	default:
+		return bearer
+	}
 }
 
 func TestDuplicateEventDedupe(t *testing.T) {
@@ -809,6 +961,160 @@ func TestRoutePendingQueueIsNotLeased(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("route_pending queue must not wake sleepy pending digest, got %+v", pending)
 	}
+	metrics, err := router.QueueMetrics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics["queued_route_pending_count"] != 1 || metrics["queued_ready_count"] != 0 {
+		t.Fatalf("expected route_pending metrics, got %+v", metrics)
+	}
+}
+
+func TestQueueMetricsBreakDownRouteStatus(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	ready := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-metrics-ready",
+		Kind:          "event",
+		Priority:      "normal",
+		EventID:       "evt-metrics-ready",
+		Source:        contracts.SourceRef{HardwareID: "sensor-metrics"},
+		Target:        contracts.TargetRef{Kind: "service", Value: "alerts"},
+		Payload:       map[string]any{"event_type": "motion_detected"},
+	}
+	if _, err := router.EnqueueOutbound(ctx, ready, ""); err != nil {
+		t.Fatal(err)
+	}
+	pending := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-metrics-pending",
+		Kind:          "command",
+		Priority:      "control",
+		CommandID:     "cmd-metrics-pending",
+		Source:        contracts.SourceRef{HardwareID: "controller-metrics"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "node-metrics-pending"},
+		Delivery:      &contracts.DeliverySpec{RouteClass: "local_control"},
+		Payload:       map[string]any{"command_name": "relay.set"},
+	}
+	if _, err := router.EnqueueOutbound(ctx, pending, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertManifest(ctx, "node-metrics-blocked", &contracts.Manifest{
+		HardwareID:          "node-metrics-blocked",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "mains",
+		WakeClass:           "always_on",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"powered_leaf"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "node-metrics-blocked", &contracts.Lease{
+		RoleLeaseID:      "lease-metrics-blocked",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-metrics-blocked",
+		FabricShortID:    intPtr(222),
+		EffectiveRole:    "powered_leaf",
+		PrimaryBearer:    "lora",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	blocked := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-metrics-blocked",
+		Kind:          "command",
+		Priority:      "control",
+		CommandID:     "cmd-metrics-blocked",
+		Source:        contracts.SourceRef{HardwareID: "controller-metrics"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "node-metrics-blocked"},
+		Delivery:      &contracts.DeliverySpec{RouteClass: "local_control"},
+		Payload:       map[string]any{"command_name": "relay.set"},
+	}
+	if _, err := router.EnqueueOutbound(ctx, blocked, ""); err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := router.QueueMetrics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]int64{
+		"queued_ready_count":         1,
+		"queued_route_pending_count": 1,
+		"queued_route_blocked_count": 1,
+		"queued_ready_to_send_count": 1,
+	} {
+		if metrics[key] != want {
+			t.Fatalf("expected %s=%d, got metrics %+v", key, want, metrics)
+		}
+	}
+}
+
+func TestDeliveryRelayIntentAffectsPolicyRoute(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, "relay-capable-01", &contracts.Manifest{
+		HardwareID:          "relay-capable-01",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "mains",
+		WakeClass:           "always_on",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"lora_relay"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "relay-capable-01", &contracts.Lease{
+		RoleLeaseID:      "lease-relay-capable",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-relay-capable",
+		FabricShortID:    intPtr(223),
+		EffectiveRole:    "lora_relay",
+		PrimaryBearer:    "lora_relay",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hopLimit := 1
+	event := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-relay-alert",
+		Kind:          "event",
+		Priority:      "critical",
+		EventID:       "evt-relay-alert",
+		Source:        contracts.SourceRef{HardwareID: "motion-relay"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "relay-capable-01"},
+		Delivery: &contracts.DeliverySpec{
+			RouteClass: "critical_alert",
+			AllowRelay: boolPtr(true),
+			HopLimit:   &hopLimit,
+		},
+		Payload: map[string]any{"event_type": "motion_detected", "severity": "critical"},
+	}
+	plan, err := router.PlanOutboundRoute(ctx, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.PayloadFit || plan.Bearer != "lora_relay" || plan.Detail["hop_limit"].(int) != 1 {
+		t.Fatalf("expected relay route to be allowed by delivery intent, got %+v", plan)
+	}
+	hopLimit = 0
+	plan, err = router.PlanOutboundRoute(ctx, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PayloadFit || plan.Reason != "relay_forbidden_by_hop_limit" {
+		t.Fatalf("expected relay blocked by hop_limit=0, got %+v", plan)
+	}
+	event.Delivery.HopLimit = nil
+	event.Delivery.AllowRelay = boolPtr(false)
+	plan, err = router.PlanOutboundRoute(ctx, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PayloadFit || plan.Reason != "relay_forbidden_by_delivery_policy" {
+		t.Fatalf("expected relay blocked by allow_relay=false, got %+v", plan)
+	}
 }
 
 func TestLeasePrimaryBearerMustMatchManifest(t *testing.T) {
@@ -952,6 +1258,112 @@ func TestPolicyRouteClassesHaveSafeMinimalGates(t *testing.T) {
 	}
 	if plan.PayloadFit || plan.Reason != "lora_payload_too_large" {
 		t.Fatalf("expected lora payload too large gate, got %+v", plan)
+	}
+}
+
+func TestRouteClassPolicyArtifactAllowedBearersMatchPlanner(t *testing.T) {
+	artifact := loadRoutePolicyArtifact(t)
+	bearers := []string{"lora_direct", "wifi", "wifi_ip", "usb_cdc", "wifi_mesh", "ble_maintenance"}
+	for routeClass, policy := range artifact.RouteClasses {
+		for index, bearer := range bearers {
+			router := openTestRouter(t)
+			role := policyRoleForRoute(policy)
+			hardwareID := routeClass + "-" + bearer
+			shortID := intPtr(300 + index)
+			upsertPolicyNode(t, router, hardwareID, role, primaryBearerForPolicyLabel(bearer), shortID)
+			plan, err := router.PlanOutboundRoute(context.Background(), routePolicyEnvelope(routeClass, hardwareID, 4))
+			allowed := routePolicyAllowsBearer(policy, bearer)
+			if allowed {
+				if err != nil {
+					t.Fatalf("%s should allow bearer %s: %v", routeClass, bearer, err)
+				}
+				if !plan.PayloadFit {
+					t.Fatalf("%s should produce payload-fit plan for bearer %s, got %+v", routeClass, bearer, plan)
+				}
+				continue
+			}
+			if err == nil && plan.PayloadFit {
+				t.Fatalf("%s must reject bearer %s per route-classes.json, got %+v", routeClass, bearer, plan)
+			}
+		}
+	}
+}
+
+func TestRouteClassPolicyArtifactLoRaCapsMatchPlanner(t *testing.T) {
+	artifact := loadRoutePolicyArtifact(t)
+	for routeClass, policy := range artifact.RouteClasses {
+		if policy.MaxLoRaBodyBytes == nil || !routePolicyAllowsBearer(policy, "lora_direct") || routeClass == "sleepy_tiny_control" {
+			continue
+		}
+		router := openTestRouter(t)
+		hardwareID := "cap-" + routeClass
+		upsertPolicyNode(t, router, hardwareID, policyRoleForRoute(policy), "lora", intPtr(410))
+
+		plan, err := router.PlanOutboundRoute(context.Background(), routePolicyEnvelope(routeClass, hardwareID, *policy.MaxLoRaBodyBytes))
+		if err != nil {
+			t.Fatalf("%s should accept max_lora_body_bytes=%d: %v", routeClass, *policy.MaxLoRaBodyBytes, err)
+		}
+		if !plan.PayloadFit {
+			t.Fatalf("%s should fit max_lora_body_bytes=%d, got %+v", routeClass, *policy.MaxLoRaBodyBytes, plan)
+		}
+
+		plan, err = router.PlanOutboundRoute(context.Background(), routePolicyEnvelope(routeClass, hardwareID, *policy.MaxLoRaBodyBytes+1))
+		if err != nil {
+			t.Fatalf("%s over-cap planning should return a non-fit plan, not error: %v", routeClass, err)
+		}
+		if plan.PayloadFit {
+			t.Fatalf("%s should reject max_lora_body_bytes+1, got %+v", routeClass, plan)
+		}
+	}
+}
+
+func TestRouteClassPolicyArtifactRelayDefaultsMatchPlanner(t *testing.T) {
+	artifact := loadRoutePolicyArtifact(t)
+	for routeClass, policy := range artifact.RouteClasses {
+		router := openTestRouter(t)
+		hardwareID := "relay-" + routeClass
+		bearer := primaryBearerForPolicyLabel(policy.AllowedBearers[0])
+		upsertPolicyNode(t, router, hardwareID, policyRoleForRoute(policy), bearer, intPtr(510))
+		plan, err := router.PlanOutboundRoute(context.Background(), routePolicyEnvelope(routeClass, hardwareID, 4))
+		if err != nil {
+			t.Fatalf("%s route planning failed: %v", routeClass, err)
+		}
+		if plan.AllowRelay != policy.AllowRelay || plan.AllowRedundant != policy.AllowRedundant {
+			t.Fatalf("%s relay defaults drifted from route-classes.json: plan relay=%t redundant=%t policy relay=%t redundant=%t",
+				routeClass, plan.AllowRelay, plan.AllowRedundant, policy.AllowRelay, policy.AllowRedundant)
+		}
+	}
+}
+
+func TestRolePolicyArtifactRequiresAlwaysOnMatchesLeaseValidation(t *testing.T) {
+	artifact := loadRolePolicyArtifact(t)
+	for role, policy := range artifact.Roles {
+		router := openTestRouter(t)
+		hardwareID := "role-policy-" + role
+		if err := router.UpsertManifest(context.Background(), hardwareID, &contracts.Manifest{
+			HardwareID:          hardwareID,
+			DeviceFamily:        "xiao-esp32s3-sx1262",
+			PowerClass:          "primary_battery",
+			WakeClass:           "sleepy_event",
+			SupportedBearers:    []string{"wifi"},
+			AllowedNetworkRoles: []string{role},
+			Firmware:            map[string]any{"app": "0.1.0"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		err := router.UpsertLease(context.Background(), hardwareID, &contracts.Lease{
+			RoleLeaseID:      "lease-" + hardwareID,
+			SiteID:           "site-a",
+			LogicalBindingID: "binding-" + hardwareID,
+			EffectiveRole:    role,
+			PrimaryBearer:    "wifi",
+		})
+		if policy.RequiresAlwaysOn && err == nil {
+			t.Fatalf("%s requires always-on per role-policy.json, but battery lease was accepted", role)
+		}
+		if !policy.RequiresAlwaysOn && err != nil {
+			t.Fatalf("%s does not require always-on per role-policy.json, but battery lease was rejected: %v", role, err)
+		}
 	}
 }
 
@@ -1256,5 +1668,9 @@ func TestFileChunkProgressRequiresContiguousCoverageAndLatestUpdate(t *testing.T
 }
 
 func intPtr(value int) *int {
+	return &value
+}
+
+func boolPtr(value bool) *bool {
 	return &value
 }

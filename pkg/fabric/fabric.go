@@ -2,7 +2,9 @@ package fabric
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Aero123421/edge-fabric/pkg/contracts"
@@ -78,10 +80,18 @@ type SendResult struct {
 	Warnings          []string
 }
 
+type PublishResult struct {
+	MessageID string
+	Persisted bool
+	Duplicate bool
+	Status    string
+}
+
 type DeviceRegistration struct {
 	HardwareID     string
 	Profile        DeviceProfile
 	ShortID        int
+	SiteID         string
 	Role           string
 	PrimaryBearer  string
 	FallbackBearer string
@@ -107,6 +117,12 @@ func WithFallbackBearer(bearer string) RegistrationOption {
 	}
 }
 
+func WithSiteID(siteID string) RegistrationOption {
+	return func(registration *DeviceRegistration) {
+		registration.SiteID = siteID
+	}
+}
+
 func OpenLocal(dbPath, sourceID string) (*Client, error) {
 	low, err := sdk.OpenLocalSite(dbPath, sourceID)
 	if err != nil {
@@ -123,6 +139,18 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) PublishState(ctx context.Context, state State) (*sdk.PersistAck, error) {
+	result, err := c.PublishStateResult(ctx, state)
+	if err != nil {
+		return nil, err
+	}
+	return &sdk.PersistAck{
+		AckedMessageID: result.MessageID,
+		Status:         result.Status,
+		Duplicate:      result.Duplicate,
+	}, nil
+}
+
+func (c *Client) PublishStateResult(ctx context.Context, state State) (*PublishResult, error) {
 	if c == nil || c.low == nil {
 		return nil, fmt.Errorf("fabric client is closed")
 	}
@@ -133,10 +161,26 @@ func (c *Client) PublishState(ctx context.Context, state State) (*sdk.PersistAck
 	if state.Value != nil {
 		payload["value"] = state.Value
 	}
-	return c.low.PublishState(ctx, state.Source, state.Key, payload, state.Priority)
+	ack, err := c.low.PublishState(ctx, state.Source, state.Key, payload, state.Priority)
+	if err != nil {
+		return nil, err
+	}
+	return publishResultFromAck(ack), nil
 }
 
 func (c *Client) EmitEvent(ctx context.Context, event Event) (*sdk.PersistAck, error) {
+	result, err := c.EmitEventResult(ctx, event)
+	if err != nil {
+		return nil, err
+	}
+	return &sdk.PersistAck{
+		AckedMessageID: result.MessageID,
+		Status:         result.Status,
+		Duplicate:      result.Duplicate,
+	}, nil
+}
+
+func (c *Client) EmitEventResult(ctx context.Context, event Event) (*PublishResult, error) {
 	if c == nil || c.low == nil {
 		return nil, fmt.Errorf("fabric client is closed")
 	}
@@ -168,7 +212,11 @@ func (c *Client) EmitEvent(ctx context.Context, event Event) (*sdk.PersistAck, e
 	if eventID == "" {
 		eventID = fmt.Sprintf("%s:%s:%d", event.Source, event.Type, time.Now().UTC().UnixNano())
 	}
-	return c.low.EmitEvent(ctx, event.Source, eventID, service, payload, event.Priority)
+	ack, err := c.low.EmitEvent(ctx, event.Source, eventID, service, payload, event.Priority)
+	if err != nil {
+		return nil, err
+	}
+	return publishResultFromAck(ack), nil
 }
 
 func (c *Client) SleepyCommand(target string) *SleepyCommandBuilder {
@@ -244,7 +292,7 @@ func (b *SleepyCommandBuilder) SendResult(ctx context.Context) (*SendResult, err
 	}
 	ack, queueID, err := b.client.low.IssueCommand(ctx, b.target, map[string]any(b.payload), options)
 	if err != nil {
-		return nil, err
+		return nil, classifyFabricError(err)
 	}
 	result := &SendResult{
 		MessageID: ack.AckedMessageID,
@@ -267,6 +315,9 @@ func (b *SleepyCommandBuilder) SendResult(ctx context.Context) (*SendResult, err
 			result.PayloadFit = route.PayloadFit
 			result.ReadyToSend = route.RouteStatus == "ready_to_send"
 		}
+	}
+	if err := routeStatusError(result); err != nil {
+		return result, err
 	}
 	return result, nil
 }
@@ -317,9 +368,13 @@ func RegisterDevice(ctx context.Context, client *Client, registration DeviceRegi
 	if primaryBearer == "" {
 		primaryBearer = profile.SupportedBearers[0]
 	}
+	siteID := registration.SiteID
+	if siteID == "" {
+		siteID = "local"
+	}
 	lease := &contracts.Lease{
 		RoleLeaseID:      "lease-" + registration.HardwareID,
-		SiteID:           "local",
+		SiteID:           siteID,
 		LogicalBindingID: "binding-" + registration.HardwareID,
 		EffectiveRole:    role,
 		PrimaryBearer:    primaryBearer,
@@ -337,4 +392,59 @@ func cloneJSON(payload JSON) JSON {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func publishResultFromAck(ack *sdk.PersistAck) *PublishResult {
+	if ack == nil {
+		return &PublishResult{}
+	}
+	return &PublishResult{
+		MessageID: ack.AckedMessageID,
+		Persisted: ack.Status == "persisted",
+		Duplicate: ack.Duplicate,
+		Status:    ack.Status,
+	}
+}
+
+func routeStatusError(result *SendResult) error {
+	if result == nil || result.RouteStatus == "" || result.RouteStatus == "ready_to_send" {
+		return nil
+	}
+	base := ErrRouteUnavailable
+	if result.RouteStatus == "route_pending" {
+		base = ErrRoutePending
+	}
+	reason := classifyRouteReason(result.RouteReason)
+	if !errors.Is(reason, base) {
+		return errors.Join(base, reason, fmt.Errorf("%s: %s", result.RouteStatus, result.RouteReason))
+	}
+	return errors.Join(base, fmt.Errorf("%s: %s", result.RouteStatus, result.RouteReason))
+}
+
+func classifyFabricError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.Join(classifyRouteReason(err.Error()), err)
+}
+
+func classifyRouteReason(reason string) error {
+	switch {
+	case strings.Contains(reason, "payload_too_large") || strings.Contains(reason, "payload exceeds"):
+		return ErrPayloadTooLarge
+	case strings.Contains(reason, "lease"):
+		return ErrLeaseMissing
+	case strings.Contains(reason, "manifest"):
+		return ErrManifestMissing
+	case strings.Contains(reason, "role"):
+		return ErrRoleDenied
+	case strings.Contains(reason, "forbidden"):
+		return ErrBearerForbidden
+	case strings.Contains(reason, "representable") || strings.Contains(reason, "compact"):
+		return ErrCommandNotRepresentable
+	case strings.Contains(reason, "gateway"):
+		return ErrGatewayUnavailable
+	default:
+		return ErrRouteUnavailable
+	}
 }

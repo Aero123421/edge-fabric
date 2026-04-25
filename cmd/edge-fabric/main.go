@@ -9,7 +9,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Aero123421/edge-fabric/internal/devfixtures"
 	"github.com/Aero123421/edge-fabric/internal/protocol/onair"
+	"github.com/Aero123421/edge-fabric/internal/protocol/usbcdc"
 	"github.com/Aero123421/edge-fabric/internal/siterouter"
 	"github.com/Aero123421/edge-fabric/pkg/contracts"
 )
@@ -30,27 +32,56 @@ func run(args []string) error {
 		return printJSON(map[string]any{
 			"status": "ok",
 			"commands": []string{
-				"edge-fabric explain-route -fixture contracts/fixtures/command-sleepy-threshold-set.json",
+				"edge-fabric seed-fixtures",
+				"edge-fabric explain-route -seed-fixtures -fixture contracts/fixtures/command-sleepy-threshold-set.json",
 				"edge-fabric decode-onair -hex <hex-frame>",
+				"edge-fabric decode-usb-frame -hex <hex-frame>",
 			},
 		})
+	case "seed-fixtures":
+		return seedFixtures(args[1:])
 	case "explain-route":
 		return explainRoute(args[1:])
 	case "decode-onair":
 		return decodeOnAir(args[1:])
+	case "decode-usb-frame":
+		return decodeUSBFrame(args[1:])
 	default:
 		return usage()
 	}
 }
 
 func usage() error {
-	return fmt.Errorf("usage: edge-fabric doctor | explain-route -fixture <envelope.json> [-db site-router.db] | decode-onair -hex <hex-frame>")
+	return fmt.Errorf("usage: edge-fabric doctor | seed-fixtures [-db site-router.db] | explain-route -fixture <envelope.json> [-seed-fixtures|-manifest file -lease file] [-db site-router.db] | decode-onair -hex <hex-frame> | decode-usb-frame -hex <hex-frame>")
+}
+
+func seedFixtures(args []string) error {
+	fs := flag.NewFlagSet("seed-fixtures", flag.ContinueOnError)
+	dbPath := fs.String("db", "site-router.db", "SQLite database path")
+	maxRetry := fs.Int("max-retry", 3, "max outbound retry count")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	router, err := siterouter.Open(*dbPath, *maxRetry)
+	if err != nil {
+		return err
+	}
+	defer router.Close()
+	seeded, err := devfixtures.SeedBuiltIn(context.Background(), router, ".")
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"db_path": *dbPath, "seeded": seeded})
 }
 
 func explainRoute(args []string) error {
 	fs := flag.NewFlagSet("explain-route", flag.ContinueOnError)
 	dbPath := fs.String("db", "site-router.db", "SQLite database path")
 	fixturePath := fs.String("fixture", "", "envelope fixture path")
+	seedBuiltIns := fs.Bool("seed-fixtures", false, "seed built-in sleepy manifest/lease fixtures before planning")
+	manifestPath := fs.String("manifest", "", "raw manifest fixture to upsert before planning")
+	leasePath := fs.String("lease", "", "raw lease fixture to upsert for the envelope target before planning")
+	strict := fs.Bool("strict", false, "return a non-zero status when the route is not sendable")
 	maxRetry := fs.Int("max-retry", 3, "max outbound retry count")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -67,24 +98,72 @@ func explainRoute(args []string) error {
 		return err
 	}
 	defer router.Close()
-	plan, err := router.PlanOutboundRoute(context.Background(), envelope)
+	ctx := context.Background()
+	var seeded []string
+	if *seedBuiltIns {
+		items, err := devfixtures.SeedBuiltIn(ctx, router, ".")
+		if err != nil {
+			return err
+		}
+		seeded = append(seeded, items...)
+	}
+	if *manifestPath != "" {
+		manifest, err := devfixtures.LoadManifest(*manifestPath)
+		if err != nil {
+			return err
+		}
+		if err := router.UpsertManifest(ctx, manifest.HardwareID, manifest); err != nil {
+			return err
+		}
+		seeded = append(seeded, "manifest:"+manifest.HardwareID)
+	}
+	if *leasePath != "" {
+		if envelope.Target.Kind != "node" || envelope.Target.Value == "" {
+			return fmt.Errorf("-lease requires an envelope with node target")
+		}
+		lease, err := devfixtures.LoadLease(*leasePath)
+		if err != nil {
+			return err
+		}
+		if err := router.UpsertLease(ctx, envelope.Target.Value, lease); err != nil {
+			return err
+		}
+		seeded = append(seeded, "lease:"+envelope.Target.Value)
+	}
+	plan, err := router.PlanOutboundRoute(ctx, envelope)
 	if err != nil {
-		return printJSON(map[string]any{
+		outputErr := printJSON(map[string]any{
 			"message_id":  envelope.MessageID,
 			"target":      envelope.Target,
 			"route_class": routeClass(envelope),
 			"allowed":     false,
+			"seeded":      seeded,
 			"error":       err.Error(),
 		})
+		if outputErr != nil {
+			return outputErr
+		}
+		if *strict {
+			return err
+		}
+		return nil
 	}
-	return printJSON(map[string]any{
+	allowed := plan.PayloadFit && plan.Bearer != "" && plan.Bearer != "unplanned"
+	if err := printJSON(map[string]any{
 		"message_id":   envelope.MessageID,
 		"target":       envelope.Target,
 		"route_class":  plan.RouteClass,
-		"allowed":      plan.PayloadFit && plan.Bearer != "" && plan.Bearer != "unplanned",
+		"allowed":      allowed,
 		"route_status": routeStatus(plan),
+		"seeded":       seeded,
 		"plan":         plan,
-	})
+	}); err != nil {
+		return err
+	}
+	if *strict && !allowed {
+		return fmt.Errorf("route is not sendable: %s", plan.Reason)
+	}
+	return nil
 }
 
 func decodeOnAir(args []string) error {
@@ -118,6 +197,51 @@ func decodeOnAir(args []string) error {
 		"target_short_id": packet.TargetShortID,
 		"body":            body,
 	})
+}
+
+func decodeUSBFrame(args []string) error {
+	fs := flag.NewFlagSet("decode-usb-frame", flag.ContinueOnError)
+	hexFrame := fs.String("hex", "", "hex encoded USB CDC frame")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *hexFrame == "" {
+		return fmt.Errorf("-hex is required")
+	}
+	frame, err := hex.DecodeString(strings.TrimSpace(*hexFrame))
+	if err != nil {
+		return err
+	}
+	frameType, payload, err := usbcdc.DecodeFrame(frame)
+	if err != nil {
+		return err
+	}
+	result := map[string]any{
+		"frame_type":  frameType,
+		"payload_hex": hex.EncodeToString(payload),
+	}
+	if json.Valid(payload) {
+		var payloadJSON any
+		if err := json.Unmarshal(payload, &payloadJSON); err == nil {
+			result["payload_json"] = payloadJSON
+		}
+	}
+	if packet, err := onair.Decode(payload); err == nil {
+		body, bodyErr := decodeBody(packet)
+		if bodyErr == nil {
+			result["onair"] = map[string]any{
+				"version":         packet.Version,
+				"logical_type":    packet.LogicalType,
+				"type_name":       typeName(packet.LogicalType),
+				"summary":         packet.Summary(),
+				"sequence":        packet.Sequence,
+				"source_short_id": packet.SourceShortID,
+				"target_short_id": packet.TargetShortID,
+				"body":            body,
+			}
+		}
+	}
+	return printJSON(result)
 }
 
 func decodeBody(packet *onair.Packet) (map[string]any, error) {

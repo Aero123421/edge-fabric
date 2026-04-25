@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/Aero123421/edge-fabric/internal/devfixtures"
 	"github.com/Aero123421/edge-fabric/internal/siterouter"
 	"github.com/Aero123421/edge-fabric/pkg/contracts"
 )
@@ -21,15 +22,16 @@ func main() {
 
 func run() error {
 	var (
-		dbPath      = flag.String("db", "site-router.db", "SQLite database path")
-		maxRetry    = flag.Int("max-retry", 3, "max outbound retry count before dead-letter")
-		op          = flag.String("op", "doctor", "operation: doctor|queue-metrics|ingest-fixture|issue-command|latest-state|command-state|pending-digest|pending-list|rebuild-latest-state")
-		fixturePath = flag.String("fixture", "", "envelope fixture path for ingest-fixture")
-		ingressID   = flag.String("ingress-id", "local-cli", "ingress id for ingest-fixture")
-		hardwareID  = flag.String("hardware-id", "", "hardware id for latest-state")
-		stateKey    = flag.String("state-key", "", "state key for latest-state")
-		commandID   = flag.String("command-id", "", "command id for command-state")
-		limit       = flag.Int("limit", 8, "result limit for pending-list")
+		dbPath       = flag.String("db", "site-router.db", "SQLite database path")
+		maxRetry     = flag.Int("max-retry", 3, "max outbound retry count before dead-letter")
+		op           = flag.String("op", "doctor", "operation: doctor|seed-fixtures|queue-metrics|ingest-fixture|issue-command|latest-state|command-state|pending-digest|pending-list|rebuild-latest-state")
+		fixturePath  = flag.String("fixture", "", "envelope fixture path for ingest-fixture")
+		seedFixtures = flag.Bool("seed-fixtures", false, "seed built-in manifest/lease fixtures before the operation")
+		ingressID    = flag.String("ingress-id", "local-cli", "ingress id for ingest-fixture")
+		hardwareID   = flag.String("hardware-id", "", "hardware id for latest-state")
+		stateKey     = flag.String("state-key", "", "state key for latest-state")
+		commandID    = flag.String("command-id", "", "command id for command-state")
+		limit        = flag.Int("limit", 8, "result limit for pending-list")
 	)
 	flag.Parse()
 
@@ -40,6 +42,11 @@ func run() error {
 	defer router.Close()
 
 	ctx := context.Background()
+	if *seedFixtures && *op != "seed-fixtures" {
+		if _, err := devfixtures.SeedBuiltIn(ctx, router, "."); err != nil {
+			return err
+		}
+	}
 	switch *op {
 	case "doctor":
 		return printJSON(map[string]any{
@@ -47,6 +54,12 @@ func run() error {
 			"max_retry":  *maxRetry,
 			"queue_info": mustQueueMetrics(ctx, router),
 		})
+	case "seed-fixtures":
+		seeded, err := devfixtures.SeedBuiltIn(ctx, router, ".")
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"seeded": seeded})
 	case "queue-metrics":
 		metrics, err := router.QueueMetrics(ctx)
 		if err != nil {

@@ -18,7 +18,7 @@
     "critical_alert": {
       "allowed_bearers": ["wifi", "wifi_ip", "lora_direct"],
       "allow_redundant": true,
-      "max_lora_body_bytes": 12,
+      "max_lora_body_bytes": 10,
       "service_level": "best_effort_urgent"
     },
     "sparse_summary": {
