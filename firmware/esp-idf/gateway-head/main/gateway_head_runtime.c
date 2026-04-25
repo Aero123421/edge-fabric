@@ -22,14 +22,29 @@ static bool s_use_default_backends;
 static bool s_transport_initialized;
 static char s_gateway_id[32];
 
+typedef struct {
+    uint32_t usb_rx_frames;
+    uint32_t usb_tx_ok;
+    uint32_t usb_tx_fail;
+    uint32_t usb_tx_backpressure;
+    uint32_t radio_rx_frames;
+    uint32_t radio_tx_ok;
+    uint32_t radio_tx_fail;
+} gateway_runtime_counters_t;
+
+static gateway_runtime_counters_t s_counters;
+
 static void gateway_head_runtime_task(void *arg);
 static esp_err_t gateway_send_heartbeat(const char *status, int extra_value);
 static esp_err_t gateway_send_usb_frame(uint8_t frame_type, const uint8_t *payload, size_t payload_len);
+static esp_err_t gateway_send_radio_frame(const uint8_t *payload, size_t payload_len);
 static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len);
 static esp_err_t gateway_handle_radio_frame(const radio_hal_frame_t *frame);
 static bool gateway_payload_is_json_object(const uint8_t *payload, size_t payload_len);
 static bool gateway_payload_is_legacy_compact(const uint8_t *payload, size_t payload_len);
 static bool gateway_dev_wire_compat_enabled(void);
+static bool gateway_usb_tx_error_is_backpressure(esp_err_t err);
+static const char *gateway_usb_dtr_state(void);
 static esp_err_t gateway_validate_onair_packet(const ef_onair_packet_t *packet);
 static uint8_t gateway_classify_radio_frame_type(const radio_hal_frame_t *frame);
 static esp_err_t gateway_head_runtime_ensure_identity(void);
@@ -54,7 +69,12 @@ esp_err_t gateway_head_runtime_init_transport(void) {
 }
 
 esp_err_t gateway_head_runtime_use_default_backends(void) {
+#if defined(CONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS) && CONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS
+    ESP_LOGE(TAG, "development backends are disabled by CONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS");
+    return ESP_ERR_INVALID_STATE;
+#else
     return gateway_head_runtime_set_default_backends(true);
+#endif
 }
 
 esp_err_t gateway_head_runtime_use_real_backends(void) {
@@ -81,6 +101,16 @@ esp_err_t gateway_head_runtime_start(void) {
         ESP_LOGE(TAG, "gateway backends are not fully configured; install explicit TX and RX backends before start");
         return ESP_ERR_INVALID_STATE;
     }
+#if defined(CONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS) && CONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS
+    if (usb_link_backend_is_development_only() || radio_hal_backend_is_development_only()) {
+        ESP_LOGE(
+            TAG,
+            "strict real backend guard rejected usb_backend=%s radio_backend=%s",
+            usb_link_backend_name(),
+            radio_hal_backend_name());
+        return ESP_ERR_INVALID_STATE;
+    }
+#endif
     ESP_RETURN_ON_ERROR(radio_hal_apply_jp_safe_profile(&gateway_profile), TAG, "profile apply failed");
     ESP_LOGI(
         TAG,
@@ -149,6 +179,7 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
     if (frame == NULL || frame_len < 10u) {
         return ESP_ERR_INVALID_ARG;
     }
+    s_counters.usb_rx_frames++;
     ESP_RETURN_ON_ERROR(ef_usb_frame_validate(frame, frame_len), TAG, "invalid USB frame");
     payload_len = (uint16_t)frame[4] | ((uint16_t)frame[5] << 8u);
     payload = &frame[6];
@@ -161,7 +192,7 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
             if (!gateway_payload_is_json_object(payload, payload_len)) {
                 return ESP_ERR_INVALID_RESPONSE;
             }
-            ESP_RETURN_ON_ERROR(radio_hal_send_frame(payload, payload_len), TAG, "LoRa TX failed");
+            ESP_RETURN_ON_ERROR(gateway_send_radio_frame(payload, payload_len), TAG, "LoRa TX failed");
             return gateway_send_heartbeat("hop_buffered", (int)payload_len);
         case EF_USB_FRAME_COMPACT_BINARY:
         case EF_USB_FRAME_SUMMARY_BINARY:
@@ -172,7 +203,7 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
                     return ESP_ERR_INVALID_RESPONSE;
                 }
             }
-            ESP_RETURN_ON_ERROR(radio_hal_send_frame(payload, payload_len), TAG, "LoRa TX failed");
+            ESP_RETURN_ON_ERROR(gateway_send_radio_frame(payload, payload_len), TAG, "LoRa TX failed");
             return gateway_send_heartbeat("hop_buffered", (int)payload_len);
         case EF_USB_FRAME_HEARTBEAT_JSON:
             ESP_LOGI(TAG, "heartbeat received from host");
@@ -183,11 +214,13 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
 }
 
 static esp_err_t gateway_handle_radio_frame(const radio_hal_frame_t *frame) {
-    char status_json[224];
+    char status_json[448];
     uint8_t frame_type;
+    int written;
     if (frame == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    s_counters.radio_rx_frames++;
     frame_type = gateway_classify_radio_frame_type(frame);
     if (frame_type == 0u) {
         return ESP_ERR_INVALID_RESPONSE;
@@ -196,38 +229,81 @@ static esp_err_t gateway_handle_radio_frame(const radio_hal_frame_t *frame) {
         gateway_send_usb_frame(frame_type, frame->payload, frame->payload_len),
         TAG,
         "USB relay failed");
-    snprintf(
+    written = snprintf(
         status_json,
         sizeof(status_json),
-        "{\"gateway_id\":\"%s\",\"subject_kind\":\"gateway\",\"subject_id\":\"%s\",\"live\":true,\"status\":\"lora_ingress\",\"rssi\":%d,\"snr\":%d}",
+        "{\"gateway_id\":\"%s\",\"subject_kind\":\"gateway\",\"subject_id\":\"%s\",\"live\":true,\"status\":\"lora_ingress\",\"rssi\":%d,\"snr\":%d,\"usb_dtr\":\"%s\",\"usb_rx_frames\":%lu,\"usb_tx_ok\":%lu,\"usb_tx_fail\":%lu,\"usb_tx_backpressure\":%lu,\"radio_rx_frames\":%lu,\"radio_tx_ok\":%lu,\"radio_tx_fail\":%lu}",
         s_gateway_id,
         s_gateway_id,
         (int)frame->rssi_dbm,
-        (int)frame->snr_db);
+        (int)frame->snr_db,
+        gateway_usb_dtr_state(),
+        (unsigned long)s_counters.usb_rx_frames,
+        (unsigned long)s_counters.usb_tx_ok,
+        (unsigned long)s_counters.usb_tx_fail,
+        (unsigned long)s_counters.usb_tx_backpressure,
+        (unsigned long)s_counters.radio_rx_frames,
+        (unsigned long)s_counters.radio_tx_ok,
+        (unsigned long)s_counters.radio_tx_fail);
+    if (written <= 0 || (size_t)written >= sizeof(status_json)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
     return gateway_send_usb_frame(EF_USB_FRAME_HEARTBEAT_JSON, (const uint8_t *)status_json, strlen(status_json));
 }
 
 static esp_err_t gateway_send_heartbeat(const char *status, int extra_value) {
-    char json[224];
-    snprintf(
+    char json[448];
+    int written = snprintf(
         json,
         sizeof(json),
-        "{\"gateway_id\":\"%s\",\"subject_kind\":\"gateway\",\"subject_id\":\"%s\",\"live\":true,\"status\":\"%s\",\"value\":%d}",
+        "{\"gateway_id\":\"%s\",\"subject_kind\":\"gateway\",\"subject_id\":\"%s\",\"live\":true,\"status\":\"%s\",\"value\":%d,\"usb_dtr\":\"%s\",\"usb_rx_frames\":%lu,\"usb_tx_ok\":%lu,\"usb_tx_fail\":%lu,\"usb_tx_backpressure\":%lu,\"radio_rx_frames\":%lu,\"radio_tx_ok\":%lu,\"radio_tx_fail\":%lu}",
         s_gateway_id,
         s_gateway_id,
         status,
-        extra_value);
+        extra_value,
+        gateway_usb_dtr_state(),
+        (unsigned long)s_counters.usb_rx_frames,
+        (unsigned long)s_counters.usb_tx_ok,
+        (unsigned long)s_counters.usb_tx_fail,
+        (unsigned long)s_counters.usb_tx_backpressure,
+        (unsigned long)s_counters.radio_rx_frames,
+        (unsigned long)s_counters.radio_tx_ok,
+        (unsigned long)s_counters.radio_tx_fail);
+    if (written <= 0 || (size_t)written >= sizeof(json)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
     return gateway_send_usb_frame(EF_USB_FRAME_HEARTBEAT_JSON, (const uint8_t *)json, strlen(json));
 }
 
 static esp_err_t gateway_send_usb_frame(uint8_t frame_type, const uint8_t *payload, size_t payload_len) {
     uint8_t frame[512];
     size_t frame_len = 0u;
-    ESP_RETURN_ON_ERROR(
-        ef_usb_frame_encode(frame_type, payload, payload_len, frame, sizeof(frame), &frame_len),
-        TAG,
-        "USB frame encode failed");
-    return usb_link_send_frame(frame, frame_len);
+    esp_err_t err = ef_usb_frame_encode(frame_type, payload, payload_len, frame, sizeof(frame), &frame_len);
+    if (err != ESP_OK) {
+        s_counters.usb_tx_fail++;
+        return err;
+    }
+    err = usb_link_send_frame(frame, frame_len);
+    if (err == ESP_OK) {
+        s_counters.usb_tx_ok++;
+        return ESP_OK;
+    }
+    s_counters.usb_tx_fail++;
+    if (gateway_usb_tx_error_is_backpressure(err)) {
+        s_counters.usb_tx_backpressure++;
+    }
+    ESP_LOGW(TAG, "USB TX failed err=%s backpressure_count=%lu", esp_err_to_name(err), (unsigned long)s_counters.usb_tx_backpressure);
+    return err;
+}
+
+static esp_err_t gateway_send_radio_frame(const uint8_t *payload, size_t payload_len) {
+    const esp_err_t err = radio_hal_send_frame(payload, payload_len);
+    if (err == ESP_OK) {
+        s_counters.radio_tx_ok++;
+        return ESP_OK;
+    }
+    s_counters.radio_tx_fail++;
+    return err;
 }
 
 static bool gateway_payload_is_json_object(const uint8_t *payload, size_t payload_len) {
@@ -264,6 +340,17 @@ static bool gateway_payload_is_legacy_compact(const uint8_t *payload, size_t pay
 
 static bool gateway_dev_wire_compat_enabled(void) {
     return radio_hal_backend_is_development_only();
+}
+
+static bool gateway_usb_tx_error_is_backpressure(esp_err_t err) {
+    return err == ESP_ERR_TIMEOUT || err == ESP_ERR_NO_MEM || err == ESP_FAIL;
+}
+
+static const char *gateway_usb_dtr_state(void) {
+    if (usb_link_backend_is_development_only()) {
+        return "n/a";
+    }
+    return "unknown";
 }
 
 static esp_err_t gateway_validate_onair_packet(const ef_onair_packet_t *packet) {

@@ -6,6 +6,8 @@ config EDGE_FABRIC_REQUIRE_REAL_BACKENDS
     help
         Production-oriented guard. When enabled, gateway-head refuses to
         fall back to the development USB/radio backends if real backend
-        initialization fails.
+        initialization fails. gateway_head_runtime_start() also rejects any
+        configuration where either installed backend is marked development
+        only, so tests cannot accidentally ship with a mixed real/dev path.
 
 endmenu

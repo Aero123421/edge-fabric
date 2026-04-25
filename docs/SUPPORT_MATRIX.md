@@ -9,8 +9,8 @@
 | Ubuntu Server | Go mainline | `Go 1.25.x` | 開発本線 | `Site Router` / `Host Agent` / SDK / durable core の主対象 |
 | Windows 開発環境 | Go mainline | `Go 1.25.x`, `python` | 制限付きサポート | 開発・検証向け。公開物と CI の正本は `go` / `python` コマンド |
 | Python reference | Python 3.12+ | `python`, `pip` | reference-only | 契約比較、fixture、behavior comparison 用 |
-| ESP32-S3 gateway-head | ESP-IDF 5.2+ | `idf.py`, 実機ボード | prototype | binary on-air frame を USB/LoRa 間で中継する。CI smoke compile はあるが real backend の HIL は未確認 |
-| ESP32-S3 sleepy leaf | ESP-IDF 5.2+ | `idf.py`, 実機ボード | prototype | binary on-air の state/event/pending-digest/tiny-poll/compact-command/result を使う。heartbeat uplink と app loop 統合はまだ限定的。CI smoke compile はあるが deep sleep / HIL は未完了 |
+| ESP32-S3 gateway-head | ESP-IDF 5.2+ | `idf.py`, 実機ボード | prototype | binary on-air frame を USB/LoRa 間で中継する。heartbeat に USB/RF counters と backpressure count を載せる。CI smoke compile はあるが real backend の HIL は未確認 |
+| ESP32-S3 sleepy leaf | ESP-IDF 5.2+ | `idf.py`, 実機ボード | prototype | binary on-air の state/event/pending-digest/tiny-poll/compact-command/result を使う。Kconfig で light/deep sleep と RTC persistence/recent token cache size を切替可能。heartbeat uplink と app loop 統合はまだ限定的。CI smoke compile はあるが deep sleep HIL は未完了 |
 
 ## Feature Status
 
@@ -25,10 +25,10 @@
 | Radio packet observation | limited | Go test | `onair_key` は durable event identity ではなく短期 duplicate window として扱う。window 経過後の同一 sequence/body は新イベントとして許可する |
 | Command token correlation | limited | Go test | 16-bit token は compact token が必要な route だけに割り当て、target node scope で解決する。global unique 前提から外したが、lease epoch/window 化は今後 |
 | Sleepy command acceptance flow | limited | `cmd/sleepy-cycle-demo` / development backend smoke | `issue -> digest -> poll -> command_result` を short-ID aware binary on-air demo と development backend smoke で確認 |
-| Gateway runtime scaffold | prototype | コードレビュー / development backend | on-air header を優先して USB frame type を決める。`lora_ingress` heartbeat は `live=true` と subject metadata を出す。raw JSON over LoRa と legacy compact fallback は development backend 用に制限 |
-| Node runtime scaffold | prototype | development backend smoke / ESP-IDF build | synthetic digest/command を binary on-air で 1 回たどる最小スモーク。fixed compact event uplink は実装済みだが、heartbeat body と sleepy app loop への統合は継続中 |
-| Real USB CDC backend | prototype | コード実装あり / HIL未検証 | TinyUSB CDC-ACM backend を追加済み |
-| Real SX1262 backend | prototype | コード実装あり / HIL未検証 | official `sx126x_driver` vendor + HAL 実装を追加済み |
+| Gateway runtime scaffold | prototype | コードレビュー / development backend | on-air header を優先して USB frame type を決める。`startup` / `hop_buffered` / `lora_ingress` heartbeat は `live=true`、subject metadata、USB/RF counters、USB TX backpressure count を出す。raw JSON over LoRa と legacy compact fallback は development backend 用に制限 |
+| Node runtime scaffold | prototype | development backend smoke / ESP-IDF build | synthetic digest/command を binary on-air で 1 回たどる最小スモーク。fixed compact event uplink と configurable recent command token cache は実装済み。deep sleep は opt-in で RTC state 復元に対応したが、heartbeat body と sleepy app loop への統合は継続中 |
+| Real USB CDC backend | prototype | コード実装あり / HIL未検証 | TinyUSB CDC-ACM backend を追加済み。runtime heartbeat counters で TX backpressure は観測できるが、DTR state は共通 API 未公開のため `unknown` として明示 |
+| Real SX1262 backend | prototype | コード実装あり / HIL未検証 | official `sx126x_driver` vendor + HAL 実装を追加済み。RF switch は board init の High 固定前提で、TX/RX polarity は HIL checklist 対象 |
 | Wi-Fi mesh backbone | alpha-contract | Go test / HIL未検証 | `wifi_mesh_backbone` route class、role gate、hop-limit gate、RoutePlan diagnostics は active。ESP-NOW 等の実データプレーンと HIL は未完了 |
 | LoRa 1-relay / 2-relay | alpha-contract | Go test / firmware helper / HIL未検証 | `relay_extension_v1`、Go/C codec、HostAgent mesh metadata、`lora_relay_1` route gate、TTL/hop-limit gate は active。always-on relay task と実機 multi-hop HIL は未完了 |
 | Hybrid routing / multi-domain | alpha-planner | Go test / HIL未検証 | `redundant_critical` route class と candidate diagnostics は active。実際の multi-path worker dispatch / failover は未完了 |
@@ -42,5 +42,5 @@
 | Python reference / artifact checks | 実行中 |
 | `doctor.py` | 既定は layout / contract check。`--track go` / `--require-go` は `go` が存在しても実行不能なら失敗 |
 | ESP-IDF `idf.py build` | CI smoke compile を構成済み。ローカル workspace 実行は環境依存 |
-| 実機 HIL | 未実行 |
+| 実機 HIL | 未実行。firmware 側の追加 checklist は deep sleep wake/RTC復元、USB DTR drop/backpressure counters、RF switch polarity、strict real backend fail-fast |
 | soak / perf / security gate | 未完了 |

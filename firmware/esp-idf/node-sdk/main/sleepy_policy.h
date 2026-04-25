@@ -4,6 +4,19 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "sdkconfig.h"
+
+#ifndef CONFIG_EDGE_FABRIC_SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE
+#define CONFIG_EDGE_FABRIC_SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE 4
+#endif
+
+#if CONFIG_EDGE_FABRIC_SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE < 1
+#define SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE 1
+#elif CONFIG_EDGE_FABRIC_SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE > 8
+#define SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE 8
+#else
+#define SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE CONFIG_EDGE_FABRIC_SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE
+#endif
 
 typedef struct {
     uint32_t rx_window_ms;
@@ -22,7 +35,7 @@ typedef struct {
     uint16_t last_command_token;
     char last_command_id[48];
     char node_id[48];
-    uint16_t recent_command_tokens[4];
+    uint16_t recent_command_tokens[SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE];
     uint8_t recent_command_cursor;
 } sleepy_policy_state_t;
 

@@ -1,0 +1,36 @@
+{
+  "version": "1.0.0",
+  "default_mode": "dev",
+  "modes": {
+    "dev": {
+      "intended_use": "local development and compatibility smoke only",
+      "allow_legacy_lora_json": true,
+      "allow_declared_lora_size_for_alpha": true,
+      "require_binary_onair_for_lora": false,
+      "require_strict_heartbeat_subject": false,
+      "enforce_radio_budget": false,
+      "allow_test_keys": true,
+      "allow_real_key_material_without_hil": false
+    },
+    "field-alpha": {
+      "intended_use": "controlled field trial without GA security claims",
+      "allow_legacy_lora_json": false,
+      "allow_declared_lora_size_for_alpha": true,
+      "require_binary_onair_for_lora": true,
+      "require_strict_heartbeat_subject": true,
+      "enforce_radio_budget": true,
+      "allow_test_keys": true,
+      "allow_real_key_material_without_hil": false
+    },
+    "production": {
+      "intended_use": "release candidate or deployed system gate",
+      "allow_legacy_lora_json": false,
+      "allow_declared_lora_size_for_alpha": false,
+      "require_binary_onair_for_lora": true,
+      "require_strict_heartbeat_subject": true,
+      "enforce_radio_budget": true,
+      "allow_test_keys": false,
+      "allow_real_key_material_without_hil": false
+    }
+  }
+}

@@ -29,3 +29,21 @@ func TestUnknownProfileRejected(t *testing.T) {
 		t.Fatal("expected unknown profile error")
 	}
 }
+
+func TestAirtimeMSForProfileIsMonotonic(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "contracts", "protocol", "jp-safe-profiles.json")
+	small, err := AirtimeMSForProfile(path, "JP125_LONG_SF10", 18)
+	if err != nil {
+		t.Fatal(err)
+	}
+	large, err := AirtimeMSForProfile(path, "JP125_LONG_SF10", 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if small <= 0 || large <= small {
+		t.Fatalf("expected airtime to grow with payload size, small=%d large=%d", small, large)
+	}
+	if large < 300 || large > 450 {
+		t.Fatalf("unexpected JP125_LONG_SF10 airtime for 24 bytes: %dms", large)
+	}
+}

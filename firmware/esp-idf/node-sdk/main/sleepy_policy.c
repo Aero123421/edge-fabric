@@ -18,9 +18,16 @@
 static const char *TAG = "sleepy_policy";
 static const uint32_t POLL_RESPONSE_WINDOW_MS = 350u;
 static const uint8_t DEFAULT_MAINTENANCE_MAX_CYCLES = 3u;
-static const uint32_t SLEEPY_RTC_MAGIC = 0x534C5059u; /* "SLPY" */
-static const uint8_t SLEEPY_RTC_VERSION = 1u;
 static SemaphoreHandle_t s_state_lock;
+
+#ifndef CONFIG_EDGE_FABRIC_SLEEPY_ENABLE_RTC_PERSISTENCE
+#define CONFIG_EDGE_FABRIC_SLEEPY_ENABLE_RTC_PERSISTENCE 0
+#endif
+
+#if CONFIG_EDGE_FABRIC_SLEEPY_ENABLE_RTC_PERSISTENCE
+static const uint32_t SLEEPY_RTC_MAGIC = 0x534C5059u; /* "SLPY" */
+static const uint8_t SLEEPY_RTC_VERSION = (uint8_t)(2u + SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE);
+#endif
 
 typedef struct {
     uint32_t magic;
@@ -29,11 +36,13 @@ typedef struct {
     uint8_t maintenance_cycles_remaining;
     uint8_t recent_command_cursor;
     uint16_t short_id;
-    uint16_t recent_command_tokens[4];
+    uint16_t recent_command_tokens[SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE];
     uint32_t checksum;
 } sleepy_rtc_state_t;
 
+#if CONFIG_EDGE_FABRIC_SLEEPY_ENABLE_RTC_PERSISTENCE
 RTC_DATA_ATTR static sleepy_rtc_state_t s_rtc_state;
+#endif
 
 static sleepy_policy_state_t s_state = {
     .rx_window_ms = 1500u,
@@ -52,7 +61,7 @@ static sleepy_policy_state_t s_state = {
     .last_command_token = 0u,
     .last_command_id = "",
     .node_id = "",
-    .recent_command_tokens = {0u, 0u, 0u, 0u},
+    .recent_command_tokens = {0u},
     .recent_command_cursor = 0u,
 };
 
@@ -76,7 +85,9 @@ static void sleepy_finish_cycle_locked(void);
 static void sleepy_store_last_command_locked(uint16_t command_token);
 static void sleepy_restore_rtc_state_locked(void);
 static void sleepy_save_rtc_state_locked(void);
+#if CONFIG_EDGE_FABRIC_SLEEPY_ENABLE_RTC_PERSISTENCE
 static uint32_t sleepy_rtc_checksum(const sleepy_rtc_state_t *state);
+#endif
 static const char *sleepy_phase_label(uint8_t phase_token);
 static const char *sleepy_reason_label(uint8_t reason_token);
 static esp_err_t sleepy_apply_compact_command(const ef_onair_compact_command_body_t *command);
@@ -214,6 +225,7 @@ esp_err_t sleepy_policy_set_maintenance_awake(bool enabled) {
     } else {
         sleepy_disable_maintenance_locked();
     }
+    sleepy_save_rtc_state_locked();
     xSemaphoreGive(s_state_lock);
     return ESP_OK;
 }
@@ -245,6 +257,7 @@ esp_err_t sleepy_policy_set_short_id(uint16_t short_id) {
     ESP_RETURN_ON_ERROR(sleepy_policy_ensure_lock(), TAG, "state lock init failed");
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
     s_state.short_id = short_id;
+    sleepy_save_rtc_state_locked();
     xSemaphoreGive(s_state_lock);
     return ESP_OK;
 }
@@ -568,13 +581,14 @@ static void sleepy_store_last_command_locked(uint16_t command_token) {
 }
 
 static void sleepy_restore_rtc_state_locked(void) {
+#if CONFIG_EDGE_FABRIC_SLEEPY_ENABLE_RTC_PERSISTENCE
     if (s_rtc_state.magic != SLEEPY_RTC_MAGIC ||
         s_rtc_state.version != SLEEPY_RTC_VERSION ||
         s_rtc_state.checksum != sleepy_rtc_checksum(&s_rtc_state)) {
         sleepy_save_rtc_state_locked();
         return;
     }
-    if (s_state.short_id == 0u && s_rtc_state.short_id != 0u) {
+    if (s_rtc_state.short_id != 0u) {
         s_state.short_id = s_rtc_state.short_id;
     }
     s_state.next_sequence = s_rtc_state.next_sequence;
@@ -584,9 +598,13 @@ static void sleepy_restore_rtc_state_locked(void) {
         (uint8_t)(s_rtc_state.recent_command_cursor %
                   (sizeof(s_state.recent_command_tokens) / sizeof(s_state.recent_command_tokens[0])));
     memcpy(s_state.recent_command_tokens, s_rtc_state.recent_command_tokens, sizeof(s_state.recent_command_tokens));
+#else
+    (void)0;
+#endif
 }
 
 static void sleepy_save_rtc_state_locked(void) {
+#if CONFIG_EDGE_FABRIC_SLEEPY_ENABLE_RTC_PERSISTENCE
     s_rtc_state.magic = SLEEPY_RTC_MAGIC;
     s_rtc_state.version = SLEEPY_RTC_VERSION;
     s_rtc_state.next_sequence = s_state.next_sequence;
@@ -595,8 +613,10 @@ static void sleepy_save_rtc_state_locked(void) {
     s_rtc_state.short_id = s_state.short_id;
     memcpy(s_rtc_state.recent_command_tokens, s_state.recent_command_tokens, sizeof(s_rtc_state.recent_command_tokens));
     s_rtc_state.checksum = sleepy_rtc_checksum(&s_rtc_state);
+#endif
 }
 
+#if CONFIG_EDGE_FABRIC_SLEEPY_ENABLE_RTC_PERSISTENCE
 static uint32_t sleepy_rtc_checksum(const sleepy_rtc_state_t *state) {
     const uint8_t *bytes = (const uint8_t *)state;
     uint32_t checksum = 2166136261u;
@@ -610,6 +630,7 @@ static uint32_t sleepy_rtc_checksum(const sleepy_rtc_state_t *state) {
     }
     return checksum;
 }
+#endif
 
 static const char *sleepy_phase_label(uint8_t phase_token) {
     switch (phase_token) {

@@ -1,0 +1,34 @@
+{
+  "version": "1.0.0",
+  "region_policy": "JP",
+  "runtime_gate": "route_planner_airtime_guard",
+  "defaults": {
+    "profile": "JP125_LONG_SF10",
+    "max_airtime_ms": 600,
+    "occupancy_window_seconds": 60,
+    "max_window_airtime_ms": 3000
+  },
+  "route_classes": {
+    "sleepy_tiny_control": {
+      "max_airtime_ms": 600
+    },
+    "critical_alert": {
+      "max_airtime_ms": 600
+    },
+    "redundant_critical": {
+      "max_airtime_ms": 600
+    },
+    "lora_relay_1": {
+      "max_airtime_ms": 520
+    },
+    "sparse_summary": {
+      "max_airtime_ms": 600
+    },
+    "sleepy_heartbeat": {
+      "max_airtime_ms": 600
+    },
+    "normal_state": {
+      "max_airtime_ms": 600
+    }
+  }
+}

@@ -1,0 +1,35 @@
+menu "Edge Fabric Sleepy Leaf"
+
+config EDGE_FABRIC_SLEEPY_USE_DEEP_SLEEP
+    bool "Enter true ESP32 deep sleep between sleepy cycles"
+    default n
+    help
+        When enabled, node-sdk publishes the compact sleep state, arms the
+        timer wake source, and calls esp_deep_sleep_start() after each
+        uplink/downlink cycle. Leave disabled for development smoke tests
+        where the process should continue after light sleep.
+
+config EDGE_FABRIC_SLEEPY_WAKE_INTERVAL_MS
+    int "Sleepy wake interval in milliseconds"
+    default 2000
+    range 100 86400000
+    help
+        Timer wake interval used by both light sleep and deep sleep modes.
+
+config EDGE_FABRIC_SLEEPY_ENABLE_RTC_PERSISTENCE
+    bool "Persist sleepy policy state in RTC memory"
+    default y
+    help
+        Keeps the next on-air sequence, maintenance cycle countdown, short
+        ID, and recent command token cache across deep sleep wakeups.
+
+config EDGE_FABRIC_SLEEPY_RECENT_COMMAND_TOKEN_CACHE_SIZE
+    int "Recent command token cache entries"
+    default 4
+    range 1 8
+    help
+        Number of recent 16-bit command tokens retained to suppress
+        duplicate terminal results. The selected size is part of the RTC
+        state version so changing it invalidates stale retained state.
+
+endmenu

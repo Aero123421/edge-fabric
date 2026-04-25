@@ -1415,6 +1415,10 @@ func TestRoutePlannerSupportsMeshRelayBackboneAndRedundantCritical(t *testing.T)
 			}); err != nil {
 				t.Fatal(err)
 			}
+			payloadBytes := 4
+			if tt.routeClass == "lora_relay_1" {
+				payloadBytes = 1
+			}
 			event := &contracts.Envelope{
 				SchemaVersion: "1.0.0",
 				MessageID:     "msg-" + tt.hardwareID,
@@ -1424,7 +1428,7 @@ func TestRoutePlannerSupportsMeshRelayBackboneAndRedundantCritical(t *testing.T)
 				Source:        contracts.SourceRef{HardwareID: "controller-" + tt.hardwareID},
 				Target:        contracts.TargetRef{Kind: "node", Value: tt.hardwareID},
 				Delivery:      &contracts.DeliverySpec{RouteClass: tt.routeClass},
-				Payload:       map[string]any{"payload_bytes": 4, "allow_declared_lora_size_for_alpha": true, "final_target_short_id": 501},
+				Payload:       map[string]any{"payload_bytes": payloadBytes, "allow_declared_lora_size_for_alpha": true, "final_target_short_id": 501},
 			}
 			plan, err := router.PlanOutboundRoute(ctx, event)
 			if err != nil {
@@ -1754,6 +1758,50 @@ func TestRouteClassPolicyArtifactLoRaCapsMatchPlanner(t *testing.T) {
 	}
 }
 
+func TestRadioBudgetAllowsCappedRelayPlanWithBudgetDetail(t *testing.T) {
+	router := openTestRouter(t)
+	upsertPolicyNode(t, router, "radio-budget-relay", "lora_relay", "lora_relay", intPtr(430))
+	envelope := routePolicyEnvelope("lora_relay_1", "radio-budget-relay", 6)
+	envelope.Payload["final_target_short_id"] = 431
+
+	plan, err := router.PlanOutboundRoute(context.Background(), envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.PayloadFit || plan.Reason != "lora_relay_1_policy" {
+		t.Fatalf("expected capped relay plan to fit the configured airtime budget, got %+v", plan)
+	}
+	budget, ok := plan.Detail["radio_budget"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected radio budget detail, got %+v", plan.Detail)
+	}
+	if budget["decision"] != "allow" || budget["profile"] != "JP125_LONG_SF10" {
+		t.Fatalf("unexpected radio budget detail: %+v", budget)
+	}
+}
+
+func TestRadioBudgetDetailPersistsOnReadyLoRaPlan(t *testing.T) {
+	router := openTestRouter(t)
+	upsertPolicyNode(t, router, "radio-budget-ready", "sleepy_leaf", "lora", intPtr(440))
+	envelope := routePolicyEnvelope("sparse_summary", "radio-budget-ready", 4)
+
+	queueID, err := router.EnqueueOutbound(context.Background(), envelope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := router.OutboxRoutePlan(context.Background(), queueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.RouteStatus != "ready_to_send" || record.RouteReason != "sparse_summary_policy" {
+		t.Fatalf("expected ready sparse_summary route, got %+v", record)
+	}
+	budget, ok := record.RoutePlan.Detail["radio_budget"].(map[string]any)
+	if !ok || budget["decision"] != "allow" {
+		t.Fatalf("expected persisted allow radio budget detail, got %+v", record.RoutePlan.Detail)
+	}
+}
+
 func TestDeclaredLoRaPayloadBytesRequireAlphaOptIn(t *testing.T) {
 	router := openTestRouter(t)
 	ctx := context.Background()
@@ -1774,6 +1822,25 @@ func TestDeclaredLoRaPayloadBytesRequireAlphaOptIn(t *testing.T) {
 	}
 	if !plan.PayloadFit || plan.Detail["payload_fit_source"] != "declared_alpha_opt_in" {
 		t.Fatalf("explicit alpha opt-in should pass declared bytes path, got %+v", plan)
+	}
+}
+
+func TestProductionRouteRejectsDeclaredLoRaPayloadBytes(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	upsertPolicyNode(t, router, "declared-production-gate", "sleepy_leaf", "lora", intPtr(450))
+	envelope := routePolicyEnvelope("sparse_summary", "declared-production-gate", 4)
+	envelope.Delivery.IngressMeta = map[string]any{"runtime_mode": "production"}
+
+	plan, err := router.PlanOutboundRoute(ctx, envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PayloadFit || plan.Reason != "lora_declared_payload_forbidden_in_production" {
+		t.Fatalf("production route must reject declared alpha size, got %+v", plan)
+	}
+	if plan.Detail["runtime_mode"] != "production" {
+		t.Fatalf("expected production runtime mode detail, got %+v", plan.Detail)
 	}
 }
 

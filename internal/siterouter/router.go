@@ -14,6 +14,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	contractpolicy "github.com/Aero123421/edge-fabric/contracts/policy"
 	"github.com/Aero123421/edge-fabric/internal/protocol/jp"
 	"github.com/Aero123421/edge-fabric/internal/protocol/onair"
 	"github.com/Aero123421/edge-fabric/pkg/contracts"
@@ -1210,14 +1211,14 @@ func (r *Router) ResolveCommandIDByTokenForTarget(ctx context.Context, targetHar
 		err = r.db.QueryRowContext(ctx, `
 			SELECT command_id FROM command_ledger
 			WHERE command_token_scope = ? AND command_token = ?
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC, rowid DESC
 			LIMIT 1
 		`, targetHardwareID, int(token)).Scan(&commandID)
 	} else {
 		err = r.db.QueryRowContext(ctx, `
 			SELECT command_id FROM command_ledger
 			WHERE command_token = ?
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC, rowid DESC
 			LIMIT 1
 		`, int(token)).Scan(&commandID)
 	}
@@ -1414,6 +1415,7 @@ func (r *Router) planOutboundRoute(ctx context.Context, envelope *contracts.Enve
 		plan.Reason = "sleepy_leaf_short_id_payload_fit"
 		plan.Detail["payload_bytes"] = len(wire)
 		plan.Detail["profile"] = "JP125_LONG_SF10"
+		applyRadioBudgetToPlan(plan, len(wire), false)
 		if info.Lease != nil && info.Lease.FabricShortID != nil {
 			plan.Detail["target_short_id"] = *info.Lease.FabricShortID
 		}
@@ -1460,6 +1462,27 @@ func (r *Router) planOutboundRoute(ctx context.Context, envelope *contracts.Enve
 
 func applyRouteClassDefaults(plan *RoutePlan, delivery *contracts.DeliverySpec) {
 	if plan == nil {
+		return
+	}
+	if policy, ok := routeClassPolicy(plan.RouteClass); ok {
+		if delivery == nil || delivery.AllowRedundant == nil {
+			plan.AllowRedundant = policy.AllowRedundant
+		}
+		if delivery == nil || delivery.AllowRelay == nil {
+			plan.AllowRelay = policy.AllowRelay
+		}
+		if delivery == nil || delivery.HopLimit == nil {
+			if policy.HopLimit != nil {
+				hopLimit := *policy.HopLimit
+				plan.HopLimit = &hopLimit
+			}
+		}
+		if policy.ServiceLevel != "" {
+			plan.Detail["service_level"] = policy.ServiceLevel
+		}
+		if policy.PendingPolicy != "" {
+			plan.Detail["pending_policy"] = policy.PendingPolicy
+		}
 		return
 	}
 	if delivery == nil || delivery.AllowRedundant == nil {
@@ -1517,6 +1540,25 @@ func (r *Router) planLoRaRelayOneHop(ctx context.Context, envelope *contracts.En
 }
 
 func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, info *NodeRuntimeInfo, routeClass string, allowedBearers []string, allowLoRaIfRepresentable bool) *RoutePlan {
+	policy, hasPolicy := routeClassPolicy(routeClass)
+	if hasPolicy {
+		if len(policy.AllowedBearers) > 0 {
+			allowedBearers = append([]string(nil), policy.AllowedBearers...)
+		}
+		allowLoRaIfRepresentable = routeClassPolicyAllowsLoRa(policy)
+		if policy.ServiceLevel != "" {
+			plan.Detail["service_level"] = policy.ServiceLevel
+		}
+		if policy.PendingPolicy != "" {
+			plan.Detail["pending_policy"] = policy.PendingPolicy
+		}
+		if len(policy.ForbiddenBearers) > 0 {
+			plan.Detail["forbidden_bearers"] = append([]string(nil), policy.ForbiddenBearers...)
+		}
+		if policy.MaxLoRaBodyBytes != nil {
+			plan.Detail["policy_max_lora_body_bytes"] = *policy.MaxLoRaBodyBytes
+		}
+	}
 	bearer := bearerLabel(nil)
 	if info != nil {
 		bearer = bearerLabel(info.Lease)
@@ -1545,6 +1587,13 @@ func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, 
 	if !plan.PayloadFit {
 		return plan
 	}
+	if hasPolicy && bearerForbiddenByPolicy(bearer, policy.ForbiddenBearers) {
+		plan.PayloadFit = false
+		plan.Reason = "bearer_forbidden_by_route_class"
+		plan.Detail["bearer"] = bearer
+		plan.Detail["allowed_bearers"] = allowedBearers
+		return plan
+	}
 	if !bearerAllowedByPolicy(bearer, allowedBearers, plan.AllowRelay) {
 		plan.PayloadFit = false
 		plan.Reason = "bearer_forbidden_by_route_class"
@@ -1559,7 +1608,13 @@ func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, 
 		return plan
 	}
 	if bearerIsLoRa(bearer) && allowLoRaIfRepresentable {
-		bytes, source := compactPayloadBodyBytes(envelope)
+		bytes, source, blockedReason := compactPayloadBodyBytes(envelope)
+		if blockedReason != "" {
+			plan.PayloadFit = false
+			plan.Reason = blockedReason
+			plan.Detail["runtime_mode"] = runtimeSecurityMode(envelope)
+			return plan
+		}
 		if bytes <= 0 {
 			plan.PayloadFit = false
 			plan.Reason = "lora_requires_compact_payload"
@@ -1575,10 +1630,23 @@ func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, 
 			plan.Detail["relayed"] = relayed
 			return plan
 		}
+		if hasPolicy && policy.MaxLoRaBodyBytes != nil && bytes > *policy.MaxLoRaBodyBytes {
+			plan.PayloadFit = false
+			plan.Reason = "lora_payload_too_large_by_route_policy"
+			plan.Detail["payload_bytes"] = bytes
+			plan.Detail["cap_bytes"] = *policy.MaxLoRaBodyBytes
+			plan.Detail["jp_cap_bytes"] = cap
+			plan.Detail["relayed"] = relayed
+			return plan
+		}
 		plan.Detail["payload_bytes"] = bytes
 		plan.Detail["payload_fit_source"] = source
 		plan.Detail["profile"] = "JP125_LONG_SF10"
 		plan.Detail["relayed"] = relayed
+		applyRadioBudgetToPlan(plan, bytes, relayed)
+		if !plan.PayloadFit {
+			return plan
+		}
 		if relayed {
 			if info == nil || info.Lease == nil || info.Lease.FabricShortID == nil {
 				plan.PayloadFit = false
@@ -2819,6 +2887,87 @@ func bearerLabel(lease *contracts.Lease) string {
 	}
 }
 
+func applyRadioBudgetToPlan(plan *RoutePlan, bodyBytes int, relayed bool) {
+	if plan == nil || bodyBytes <= 0 {
+		return
+	}
+	decision := map[string]any{
+		"body_bytes": bodyBytes,
+		"relayed":    relayed,
+	}
+	overheadBytes := jp.DirectUplinkOverheadBytes
+	if relayed {
+		overheadBytes = jp.RelayedUplinkOverheadBytes
+	}
+	totalPayloadBytes := bodyBytes + overheadBytes
+	decision["overhead_bytes"] = overheadBytes
+	decision["total_payload_bytes"] = totalPayloadBytes
+
+	budget, err := radioBudgetForRouteClass(plan.RouteClass)
+	if err != nil {
+		plan.PayloadFit = false
+		plan.Reason = "radio_budget_policy_unavailable"
+		decision["decision"] = "block"
+		decision["error"] = err.Error()
+		plan.Detail["radio_budget"] = decision
+		return
+	}
+	profile := budget.Profile
+	if profile == "" {
+		profile = "JP125_LONG_SF10"
+	}
+	decision["profile"] = profile
+	decision["max_airtime_ms"] = budget.MaxAirtimeMS
+	if budget.OccupancyWindowSeconds > 0 {
+		decision["occupancy_window_seconds"] = budget.OccupancyWindowSeconds
+	}
+	if budget.MaxWindowAirtimeMS > 0 {
+		decision["max_window_airtime_ms"] = budget.MaxWindowAirtimeMS
+	}
+	airtimeMS, err := jp.AirtimeMSForProfile(jpProfilePath(), profile, totalPayloadBytes)
+	if err != nil {
+		plan.PayloadFit = false
+		plan.Reason = "radio_budget_estimate_failed"
+		decision["decision"] = "block"
+		decision["error"] = err.Error()
+		plan.Detail["radio_budget"] = decision
+		return
+	}
+	decision["estimated_airtime_ms"] = airtimeMS
+	if budget.MaxAirtimeMS > 0 && airtimeMS > budget.MaxAirtimeMS {
+		plan.PayloadFit = false
+		plan.Reason = "radio_airtime_budget_exceeded"
+		decision["decision"] = "block"
+		plan.Detail["radio_budget"] = decision
+		return
+	}
+	decision["decision"] = "allow"
+	plan.Detail["radio_budget"] = decision
+}
+
+func radioBudgetForRouteClass(routeClass string) (contractpolicy.RadioBudgetPolicy, error) {
+	artifact, err := contractpolicy.LoadRadioBudget()
+	if err != nil {
+		return contractpolicy.RadioBudgetPolicy{}, err
+	}
+	budget := artifact.Defaults
+	if routeBudget, ok := artifact.RouteClasses[routeClass]; ok {
+		if routeBudget.Profile != "" {
+			budget.Profile = routeBudget.Profile
+		}
+		if routeBudget.MaxAirtimeMS > 0 {
+			budget.MaxAirtimeMS = routeBudget.MaxAirtimeMS
+		}
+		if routeBudget.OccupancyWindowSeconds > 0 {
+			budget.OccupancyWindowSeconds = routeBudget.OccupancyWindowSeconds
+		}
+		if routeBudget.MaxWindowAirtimeMS > 0 {
+			budget.MaxWindowAirtimeMS = routeBudget.MaxWindowAirtimeMS
+		}
+	}
+	return budget, nil
+}
+
 func bearerIsLoRa(bearer string) bool {
 	return bearer == "lora" || strings.HasPrefix(bearer, "lora_")
 }
@@ -2883,6 +3032,37 @@ func bearerAllowedByPolicy(bearer string, allowed []string, allowRelay bool) boo
 	return false
 }
 
+func routeClassPolicy(routeClass string) (contractpolicy.RouteClassPolicy, bool) {
+	if routeClass == "" {
+		return contractpolicy.RouteClassPolicy{}, false
+	}
+	return contractpolicy.MustRouteClass(routeClass)
+}
+
+func routeClassPolicyAllowsLoRa(policy contractpolicy.RouteClassPolicy) bool {
+	for _, bearer := range policy.AllowedBearers {
+		if bearerIsLoRa(bearer) {
+			return true
+		}
+	}
+	return false
+}
+
+func bearerForbiddenByPolicy(bearer string, forbidden []string) bool {
+	for _, candidate := range forbidden {
+		if bearer == candidate {
+			return true
+		}
+		if candidate == "lora" && bearerIsLoRa(bearer) {
+			return true
+		}
+		if candidate == "wifi" && manifestBearerName(bearer) == "wifi" {
+			return true
+		}
+	}
+	return false
+}
+
 func routeClassAllowsTargetRole(routeClass string, info *NodeRuntimeInfo) bool {
 	required := requiredRolesForRouteClass(routeClass)
 	if len(required) == 0 {
@@ -2905,6 +3085,9 @@ func leaseRole(info *NodeRuntimeInfo) string {
 }
 
 func requiredRolesForRouteClass(routeClass string) []string {
+	if policy, ok := routeClassPolicy(routeClass); ok && len(policy.RequiresTargetRole) > 0 {
+		return append([]string(nil), policy.RequiresTargetRole...)
+	}
 	switch routeClass {
 	case "sleepy_tiny_control", "maintenance_sync", "sleepy_heartbeat":
 		return []string{"sleepy_leaf"}
@@ -2940,40 +3123,51 @@ func commandQueueKey(envelope *contracts.Envelope, queueKey string) string {
 	return "message:"
 }
 
-func payloadDeclaredBytes(payload map[string]any) int {
-	if !payloadBool(payload, "allow_declared_lora_size_for_alpha") {
-		return 0
+func payloadDeclaredBytes(envelope *contracts.Envelope) (int, string) {
+	if envelope == nil || !payloadBool(envelope.Payload, "allow_declared_lora_size_for_alpha") {
+		return 0, ""
+	}
+	mode := runtimeSecurityMode(envelope)
+	if policy, ok := securityModePolicy(mode); ok && !policy.AllowDeclaredLoRaSizeForAlpha {
+		return 0, "lora_declared_payload_forbidden_in_production"
+	}
+	if mode == "production" {
+		return 0, "lora_declared_payload_forbidden_in_production"
 	}
 	for _, key := range []string{"payload_bytes", "body_bytes", "summary_bytes", "compact_bytes"} {
-		if value := payloadInt64(payload, key); value != nil && *value > 0 && *value <= int64(^uint(0)>>1) {
-			return int(*value)
+		if value := payloadInt64(envelope.Payload, key); value != nil && *value > 0 && *value <= int64(^uint(0)>>1) {
+			return int(*value), ""
 		}
 	}
-	return 0
+	return 0, ""
 }
 
-func compactPayloadBodyBytes(envelope *contracts.Envelope) (int, string) {
+func compactPayloadBodyBytes(envelope *contracts.Envelope) (int, string, string) {
 	if envelope == nil {
-		return 0, ""
+		return 0, "", ""
 	}
 	switch envelope.Kind {
 	case "event":
 		if eventBodyRepresentable(envelope.Payload) {
-			return len([]byte{0, 0, 0, 0}), "onair_event_body"
+			return len([]byte{0, 0, 0, 0}), "onair_event_body", ""
 		}
 	case "heartbeat":
 		if heartbeatBodyRepresentable(envelope.Payload) {
-			return len([]byte{0, 0, 0, 0, 0}), "onair_heartbeat_body"
+			return len([]byte{0, 0, 0, 0, 0}), "onair_heartbeat_body", ""
 		}
 	case "state":
 		if stateBodyRepresentable(envelope.Payload) {
-			return len([]byte{0, 0, 0}), "onair_state_body"
+			return len([]byte{0, 0, 0}), "onair_state_body", ""
 		}
 	}
-	if declared := payloadDeclaredBytes(envelope.Payload); declared > 0 {
-		return declared, "declared_alpha_opt_in"
+	declared, blockedReason := payloadDeclaredBytes(envelope)
+	if blockedReason != "" {
+		return 0, "", blockedReason
 	}
-	return 0, ""
+	if declared > 0 {
+		return declared, "declared_alpha_opt_in", ""
+	}
+	return 0, "", ""
 }
 
 func eventBodyRepresentable(payload map[string]any) bool {
@@ -3041,6 +3235,69 @@ func payloadBool(payload map[string]any, key string) bool {
 	}
 	value, _ := payload[key].(bool)
 	return value
+}
+
+func runtimeSecurityMode(envelope *contracts.Envelope) string {
+	if envelope == nil {
+		return defaultRuntimeSecurityMode()
+	}
+	if envelope.Delivery != nil {
+		if mode, _ := envelope.Delivery.IngressMeta["runtime_mode"].(string); mode != "" {
+			return normalizeRuntimeSecurityMode(mode)
+		}
+	}
+	if mode := payloadString(envelope.Payload, "runtime_mode"); mode != "" {
+		return normalizeRuntimeSecurityMode(mode)
+	}
+	if payloadBool(envelope.Payload, "production") {
+		return "production"
+	}
+	return defaultRuntimeSecurityMode()
+}
+
+func hasExplicitRuntimeSecurityMode(envelope *contracts.Envelope) bool {
+	if envelope == nil {
+		return false
+	}
+	if envelope.Delivery != nil {
+		if mode, _ := envelope.Delivery.IngressMeta["runtime_mode"].(string); mode != "" {
+			return true
+		}
+	}
+	return payloadString(envelope.Payload, "runtime_mode") != "" || payloadBool(envelope.Payload, "production")
+}
+
+func normalizeRuntimeSecurityMode(mode string) string {
+	if artifact, err := contractpolicy.LoadSecurityModes(); err == nil {
+		if _, ok := artifact.Modes[mode]; ok {
+			return mode
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "dev", "development":
+		return "dev"
+	case "production", "prod":
+		return "production"
+	default:
+		return defaultRuntimeSecurityMode()
+	}
+}
+
+func defaultRuntimeSecurityMode() string {
+	artifact, err := contractpolicy.LoadSecurityModes()
+	if err == nil && artifact.DefaultMode != "" {
+		return artifact.DefaultMode
+	}
+	return "field-alpha"
+}
+
+func securityModePolicy(mode string) (contractpolicy.SecurityModePolicy, bool) {
+	artifact, err := contractpolicy.LoadSecurityModes()
+	if err != nil {
+		return contractpolicy.SecurityModePolicy{}, false
+	}
+	policy, ok := artifact.Modes[normalizeRuntimeSecurityMode(mode)]
+	return policy, ok
 }
 
 func envelopeOnAirKey(envelope *contracts.Envelope) string {
@@ -3116,7 +3373,13 @@ func validateHeartbeatSubject(envelope *contracts.Envelope) error {
 	if envelope == nil || envelope.Kind != "heartbeat" {
 		return nil
 	}
-	if !payloadBool(envelope.Payload, "production") && !payloadBool(envelope.Payload, "strict_subject") {
+	requireStrict := payloadBool(envelope.Payload, "production") || payloadBool(envelope.Payload, "strict_subject")
+	if hasExplicitRuntimeSecurityMode(envelope) {
+		if policy, ok := securityModePolicy(runtimeSecurityMode(envelope)); ok && policy.RequireStrictHeartbeatSubject {
+			requireStrict = true
+		}
+	}
+	if !requireStrict {
 		return nil
 	}
 	subjectKind := payloadString(envelope.Payload, "subject_kind")
@@ -3325,6 +3588,9 @@ func findJPProfileCap(file *jp.ProfileFile, name string) (int, error) {
 }
 
 func leaseRoleRequiresAlwaysOn(role string) bool {
+	if policy, ok := contractpolicy.MustRole(role); ok {
+		return policy.RequiresAlwaysOn
+	}
 	switch role {
 	case "lora_relay", "mesh_router", "mesh_root", "ack_owner", "powered_leaf", "dual_bearer_bridge", "gateway_head":
 		return true

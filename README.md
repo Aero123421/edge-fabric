@@ -4,7 +4,7 @@
 LoRa + Wi-Fi ハイブリッド fabric の **実装リポジトリ** です。
 
 現状は **strong alpha / pre-beta** です。`durable Site Router`、`Host Agent`、
-binary on-air v1、sleepy tiny command、gateway heartbeat ingest、外向き `pkg/fabric` SDK の入口は動く本線として整備していますが、
+binary on-air v1、sleepy tiny command、gateway heartbeat ingest、外向き `pkg/fabric` SDK の入口、policy artifact 連動 RoutePlanner は動く本線として整備していますが、
 Wi-Fi mesh backbone、LoRa relay / multi-hop、自動 hybrid route selection、本番 provisioning、
 deep sleep field deployment はまだ完成扱いではありません。
 
@@ -28,7 +28,10 @@ Current Alpha Can:
 - binary on-air v1 の `state / event / command_result / pending_digest / tiny_poll / compact_command / heartbeat` を encode/decode する
 - sleepy tiny command を short ID / command token / JP payload cap 前提で扱う
 - `pkg/fabric` から state / event / sleepy tiny command を typed entrypoint で発行し、EventID / DeviceProfile 登録 option / SendResult を扱う
-- `contracts/policy/` で device profile / role policy / route class の安全な初期方針を固定する
+- `contracts/policy/` の device profile / role policy / route class / security mode / RadioBudget を Go runtime が読み、RoutePlanner の gate と diagnostics に反映する
+- RoutePlanner は `local_control / bulk_wifi_only / critical_alert / sparse_summary / lora_relay_1 / wifi_mesh_backbone / redundant_critical` の bearer / role / hop-limit / payload / RadioBudget gate を評価する
+- `production` runtime mode では strict heartbeat subject、declared-size LoRa compatibility block、RadioBudget airtime guard を enforce する
+- sleepy leaf firmware は opt-in deep sleep と RTC persistence / recent command token cache size を Kconfig で切替できる
 - on-air packet key は durable event identity ではなく短期 radio duplicate window として扱い、古い同一 key は新イベントとして通す
 - clean source export を生成し、Python / Go / firmware build smoke CI で主線を守る
 
