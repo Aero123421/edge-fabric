@@ -23,9 +23,9 @@
 - `route_pending` / `route_blocked` は worker lease 対象外です。再計画 worker / explain-route CLI は今後の hardening 対象です
 - sleepy command の 16-bit `command_token` は `sleepy_tiny_control` など compact token が必要な route だけで割り当て、target node scope で解決します。lease epoch / active window scoped token reuse は今後の hardening 対象です
 - `sleepy_tiny_control` の compact downlink は小さい command subset を優先し、rich payload / OTA / maintenance transfer はまだ summary / maintenance path 側です
-- `Wi-Fi mesh backbone`
-- `LoRa 1-relay / 2-relay`
-- `hybrid routing`
+- `Wi-Fi mesh backbone` は route-class / role gate / hop-limit / diagnostics までの alpha-contract 実装です。実 Wi-Fi mesh データプレーンと HIL はまだ未完了です
+- `LoRa 1-relay / 2-relay` は `relay_extension_v1` と Go/C codec、HostAgent metadata、RoutePlanner gate までの alpha-contract 実装です。always-on relay task と実機 multi-hop HIL はまだ未完了です
+- `hybrid routing` は route candidate / RoutePlan diagnostics までです。実際の multi-path worker dispatch / failover はまだ未完了です
 - `multi-domain / multi-host`
 
 これらは実装中で、GA scope ではありません。

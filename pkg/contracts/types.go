@@ -42,12 +42,16 @@ type DeliverySpec struct {
 }
 
 type MeshMeta struct {
-	MeshDomainID     string   `json:"mesh_domain_id,omitempty"`
-	OnAirKey         string   `json:"onair_key,omitempty"`
-	HopCount         *int     `json:"hop_count,omitempty"`
-	LastHop          string   `json:"last_hop,omitempty"`
-	IngressGatewayID string   `json:"ingress_gateway_id,omitempty"`
-	RelayTrace       []string `json:"relay_trace,omitempty"`
+	MeshDomainID       string   `json:"mesh_domain_id,omitempty"`
+	OnAirKey           string   `json:"onair_key,omitempty"`
+	OriginShortID      *int     `json:"origin_short_id,omitempty"`
+	PreviousHopShortID *int     `json:"previous_hop_short_id,omitempty"`
+	TTL                *int     `json:"ttl,omitempty"`
+	HopCount           *int     `json:"hop_count,omitempty"`
+	RouteHint          *int     `json:"route_hint,omitempty"`
+	LastHop            string   `json:"last_hop,omitempty"`
+	IngressGatewayID   string   `json:"ingress_gateway_id,omitempty"`
+	RelayTrace         []string `json:"relay_trace,omitempty"`
 }
 
 type AckInfo struct {
@@ -209,6 +213,9 @@ func (e *Envelope) Validate() error {
 	}
 	if e.MeshMeta != nil && e.MeshMeta.HopCount != nil && *e.MeshMeta.HopCount < 0 {
 		return NewValidationError("mesh_meta.hop_count must be >= 0")
+	}
+	if e.MeshMeta != nil && e.MeshMeta.TTL != nil && (*e.MeshMeta.TTL < 0 || *e.MeshMeta.TTL > 255) {
+		return NewValidationError("mesh_meta.ttl must be between 0 and 255")
 	}
 	return nil
 }

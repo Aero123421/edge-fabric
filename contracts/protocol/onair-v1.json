@@ -15,7 +15,8 @@
     ]
   },
   "flags": {
-    "summary": 1
+    "summary": 1,
+    "relay_extension": 2
   },
   "logical_types": {
     "1": {
@@ -63,7 +64,9 @@
   },
   "relay_extension": {
     "version": "relay_extension_v1",
-    "implementation_status": "planned",
+    "implementation_status": "active",
+    "size_bytes": 7,
+    "presence": "present when flags.relay_extension is set; bytes are placed after the base header and before the logical body",
     "fields": [
       "origin_short_id_le16",
       "previous_hop_short_id_le16",

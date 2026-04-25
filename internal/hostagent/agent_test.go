@@ -491,6 +491,45 @@ func TestOnAirEventIDIsStableAcrossHostAgents(t *testing.T) {
 	}
 }
 
+func TestRelayedOnAirEventCarriesMeshMetadata(t *testing.T) {
+	wire, err := onair.Encode(onair.Packet{
+		LogicalType:   onair.TypeEvent,
+		Sequence:      31,
+		SourceShortID: 302,
+		TargetShortID: 1,
+		Relay: &onair.RelayExtension{
+			OriginShortID:      201,
+			PreviousHopShortID: 302,
+			TTL:                2,
+			HopCount:           1,
+			RouteHint:          9,
+		},
+		Body: []byte{onair.EventCodeMotionDetected, onair.EventSeverityCritical, 4, onair.EventFlagEventWake},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, _, err := decodeCompactSummaryEnvelope(context.Background(), nil, FrameCompactBinary, wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope.MeshMeta == nil || envelope.MeshMeta.OriginShortID == nil || *envelope.MeshMeta.OriginShortID != 201 ||
+		envelope.MeshMeta.PreviousHopShortID == nil || *envelope.MeshMeta.PreviousHopShortID != 302 ||
+		envelope.MeshMeta.TTL == nil || *envelope.MeshMeta.TTL != 2 ||
+		envelope.MeshMeta.HopCount == nil || *envelope.MeshMeta.HopCount != 1 {
+		t.Fatalf("expected relay mesh metadata, got %+v", envelope.MeshMeta)
+	}
+	if envelope.Payload["relay_extension"] != true || envelope.Payload["origin_short_id"].(int) != 201 {
+		t.Fatalf("expected relay payload annotations, got %+v", envelope.Payload)
+	}
+	if envelope.Source.HardwareID != "short:201" || envelope.Source.FabricShortID == nil || *envelope.Source.FabricShortID != 201 {
+		t.Fatalf("expected relayed envelope source to resolve to origin, got %+v", envelope.Source)
+	}
+	if !strings.Contains(envelope.MeshMeta.OnAirKey, "201:") {
+		t.Fatalf("expected on-air key to be scoped by origin short id, got %s", envelope.MeshMeta.OnAirKey)
+	}
+}
+
 func TestDigestAndPollFramesBecomeControlHeartbeats(t *testing.T) {
 	agent, router := openAgentAndRouter(t)
 	digestRaw, err := onair.EncodePendingDigest(201, true, 9, onair.PendingDigestBody{PendingCount: 1, Flags: onair.PendingFlagUrgent})

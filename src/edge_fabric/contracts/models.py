@@ -116,7 +116,11 @@ class DeliverySpec:
 @dataclass(frozen=True)
 class MeshMeta:
     mesh_domain_id: str | None = None
+    origin_short_id: int | None = None
+    previous_hop_short_id: int | None = None
+    ttl: int | None = None
     hop_count: int | None = None
+    route_hint: int | None = None
     last_hop: str | None = None
     ingress_gateway_id: str | None = None
     relay_trace: tuple[str, ...] = ()
@@ -130,6 +134,19 @@ class MeshMeta:
         hop_count = _optional_int(data, "hop_count")
         if hop_count is not None and hop_count < 0:
             raise ValueError("'hop_count' must be >= 0")
+        origin_short_id = _optional_int(data, "origin_short_id")
+        previous_hop_short_id = _optional_int(data, "previous_hop_short_id")
+        ttl = _optional_int(data, "ttl")
+        route_hint = _optional_int(data, "route_hint")
+        for key, value in (
+            ("origin_short_id", origin_short_id),
+            ("previous_hop_short_id", previous_hop_short_id),
+        ):
+            if value is not None and not 0 <= value <= 65535:
+                raise ValueError(f"'{key}' must be between 0 and 65535")
+        for key, value in (("ttl", ttl), ("route_hint", route_hint)):
+            if value is not None and not 0 <= value <= 255:
+                raise ValueError(f"'{key}' must be between 0 and 255")
         relay_trace_raw = data.get("relay_trace", [])
         if not isinstance(relay_trace_raw, list) or not all(
             isinstance(item, str) for item in relay_trace_raw
@@ -137,7 +154,11 @@ class MeshMeta:
             raise ValueError("'relay_trace' must be a list[str]")
         return cls(
             mesh_domain_id=_optional_str(data, "mesh_domain_id"),
+            origin_short_id=origin_short_id,
+            previous_hop_short_id=previous_hop_short_id,
+            ttl=ttl,
             hop_count=hop_count,
+            route_hint=route_hint,
             last_hop=_optional_str(data, "last_hop"),
             ingress_gateway_id=_optional_str(data, "ingress_gateway_id"),
             relay_trace=tuple(relay_trace_raw),

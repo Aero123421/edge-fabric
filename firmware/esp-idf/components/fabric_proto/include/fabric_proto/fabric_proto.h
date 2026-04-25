@@ -32,7 +32,9 @@ typedef struct {
 
 #define EF_ONAIR_VERSION 1u
 #define EF_ONAIR_HEADER_SIZE 8u
+#define EF_ONAIR_RELAY_EXTENSION_SIZE 7u
 #define EF_ONAIR_FLAG_SUMMARY (1u << 0)
+#define EF_ONAIR_FLAG_RELAY_EXTENSION (1u << 1)
 
 typedef enum {
     EF_ONAIR_TYPE_STATE = 1,
@@ -122,12 +124,22 @@ typedef enum {
 } ef_onair_heartbeat_flag_t;
 
 typedef struct {
+    uint16_t origin_short_id;
+    uint16_t previous_hop_short_id;
+    uint8_t ttl;
+    uint8_t hop_count;
+    uint8_t route_hint;
+} ef_onair_relay_extension_t;
+
+typedef struct {
     uint8_t version;
     uint8_t logical_type;
     uint8_t flags;
     uint8_t sequence;
     uint16_t source_short_id;
     uint16_t target_short_id;
+    bool has_relay;
+    ef_onair_relay_extension_t relay;
     const uint8_t *body;
     size_t body_len;
 } ef_onair_packet_t;
@@ -200,6 +212,10 @@ esp_err_t ef_onair_encode_packet(
     uint8_t *out_buf,
     size_t out_buf_cap,
     size_t *out_len);
+esp_err_t ef_onair_build_relay_forward(
+    const ef_onair_packet_t *packet,
+    uint16_t relay_short_id,
+    ef_onair_packet_t *out_packet);
 
 esp_err_t ef_onair_encode_state(
     uint16_t source_short_id,

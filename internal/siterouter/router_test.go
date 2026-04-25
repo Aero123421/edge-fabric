@@ -35,6 +35,7 @@ type routePolicySpec struct {
 	MaxLoRaBodyBytes   *int     `json:"max_lora_body_bytes"`
 	AllowRelay         bool     `json:"allow_relay"`
 	AllowRedundant     bool     `json:"allow_redundant"`
+	HopLimit           *int     `json:"hop_limit"`
 }
 
 type rolePolicyArtifact struct {
@@ -114,6 +115,9 @@ func policyWakeClass(role string) string {
 func policyRoleForRoute(policy routePolicySpec) string {
 	if policyContainsString(policy.RequiresTargetRole, "sleepy_leaf") {
 		return "sleepy_leaf"
+	}
+	if len(policy.RequiresTargetRole) > 0 {
+		return policy.RequiresTargetRole[0]
 	}
 	return "powered_leaf"
 }
@@ -302,6 +306,64 @@ func TestOnAirPacketKeyDedupeExpires(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("expected 2 events after dedupe window expiry, got %d", count)
+	}
+}
+
+func TestRelayPacketDedupeNormalizesRelayHopFields(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	originPacketKey := "onair-v1:201:1:31:2:abcdef01"
+	firstHopCount := 1
+	first := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-relay-dedupe-a",
+		Kind:          "event",
+		Priority:      "critical",
+		EventID:       "evt-relay-dedupe-a",
+		Source:        contracts.SourceRef{HardwareID: "sleepy-relay-origin", FabricShortID: intPtr(201)},
+		Target:        contracts.TargetRef{Kind: "service", Value: "alerts"},
+		MeshMeta: &contracts.MeshMeta{
+			OnAirKey:   originPacketKey + ":prev=301:ttl=2",
+			HopCount:   &firstHopCount,
+			LastHop:    "relay-a",
+			RelayTrace: []string{"relay-a"},
+		},
+		Payload: map[string]any{
+			"origin_onair_key": originPacketKey,
+			"event_code":       2,
+			"severity":         3,
+		},
+	}
+	second := *first
+	second.MessageID = "msg-relay-dedupe-b"
+	second.EventID = "evt-relay-dedupe-b"
+	secondHopCount := 2
+	second.MeshMeta = &contracts.MeshMeta{
+		OnAirKey:   originPacketKey + ":prev=302:ttl=1",
+		HopCount:   &secondHopCount,
+		LastHop:    "relay-b",
+		RelayTrace: []string{"relay-a", "relay-b"},
+	}
+	ack1, err := router.Ingest(ctx, first, "gateway-relay-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack2, err := router.Ingest(ctx, &second, "gateway-relay-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack1.Duplicate {
+		t.Fatal("first relayed packet observation must not be duplicate")
+	}
+	if !ack2.Duplicate || ack2.AckedMessageID != first.MessageID {
+		t.Fatalf("relay hop metadata must not create a new durable event, got ack %+v", ack2)
+	}
+	count, err := router.CountEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected relay duplicate to persist one event, got %d", count)
 	}
 }
 
@@ -1117,6 +1179,213 @@ func TestDeliveryRelayIntentAffectsPolicyRoute(t *testing.T) {
 	}
 }
 
+func TestRelayRouteBlocksWhenHopCountExhaustsTTL(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, "relay-ttl-01", &contracts.Manifest{
+		HardwareID:          "relay-ttl-01",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "mains",
+		WakeClass:           "always_on",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"lora_relay"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "relay-ttl-01", &contracts.Lease{
+		RoleLeaseID:      "lease-relay-ttl",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-relay-ttl",
+		FabricShortID:    intPtr(224),
+		EffectiveRole:    "lora_relay",
+		PrimaryBearer:    "lora_relay",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hopLimit := 2
+	hopCount := 2
+	event := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-relay-ttl-exhausted",
+		Kind:          "event",
+		Priority:      "critical",
+		EventID:       "evt-relay-ttl-exhausted",
+		Source:        contracts.SourceRef{HardwareID: "motion-relay-ttl"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "relay-ttl-01"},
+		Delivery: &contracts.DeliverySpec{
+			RouteClass: "critical_alert",
+			AllowRelay: boolPtr(true),
+			HopLimit:   &hopLimit,
+		},
+		MeshMeta: &contracts.MeshMeta{HopCount: &hopCount, LastHop: "relay-a"},
+		Payload:  map[string]any{"payload_bytes": 4},
+	}
+	plan, err := router.PlanOutboundRoute(ctx, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PayloadFit || plan.Reason != "relay_ttl_exhausted" {
+		t.Fatalf("expected relay TTL exhausted by hop_count=hop_limit, got %+v", plan)
+	}
+}
+
+func TestRoutePlannerSupportsMeshRelayBackboneAndRedundantCritical(t *testing.T) {
+	tests := []struct {
+		name            string
+		routeClass      string
+		hardwareID      string
+		role            string
+		primaryBearer   string
+		supportedBearer string
+		wantBearer      string
+		wantRelay       bool
+		wantRedundant   bool
+		wantHopLimit    *int
+	}{
+		{
+			name:            "lora one relay",
+			routeClass:      "lora_relay_1",
+			hardwareID:      "route-lora-relay-1",
+			role:            "lora_relay",
+			primaryBearer:   "lora_relay",
+			supportedBearer: "lora",
+			wantBearer:      "lora_relay",
+			wantRelay:       true,
+			wantHopLimit:    intPtr(1),
+		},
+		{
+			name:            "wifi mesh backbone",
+			routeClass:      "wifi_mesh_backbone",
+			hardwareID:      "route-wifi-mesh-backbone",
+			role:            "mesh_router",
+			primaryBearer:   "wifi_mesh",
+			supportedBearer: "wifi",
+			wantBearer:      "wifi_mesh",
+			wantRelay:       true,
+		},
+		{
+			name:            "redundant critical",
+			routeClass:      "redundant_critical",
+			hardwareID:      "route-redundant-critical",
+			role:            "dual_bearer_bridge",
+			primaryBearer:   "wifi_ip",
+			supportedBearer: "wifi",
+			wantBearer:      "wifi_ip",
+			wantRelay:       true,
+			wantRedundant:   true,
+			wantHopLimit:    intPtr(2),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := openTestRouter(t)
+			ctx := context.Background()
+			if err := router.UpsertManifest(ctx, tt.hardwareID, &contracts.Manifest{
+				HardwareID:          tt.hardwareID,
+				DeviceFamily:        "xiao-esp32s3-sx1262",
+				PowerClass:          "mains",
+				WakeClass:           "always_on",
+				SupportedBearers:    []string{tt.supportedBearer},
+				AllowedNetworkRoles: []string{tt.role},
+				Firmware:            map[string]any{"app": "0.1.0"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := router.UpsertLease(ctx, tt.hardwareID, &contracts.Lease{
+				RoleLeaseID:      "lease-" + tt.hardwareID,
+				SiteID:           "site-a",
+				LogicalBindingID: "binding-" + tt.hardwareID,
+				FabricShortID:    intPtr(500),
+				EffectiveRole:    tt.role,
+				PrimaryBearer:    tt.primaryBearer,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			event := &contracts.Envelope{
+				SchemaVersion: "1.0.0",
+				MessageID:     "msg-" + tt.hardwareID,
+				Kind:          "event",
+				Priority:      "critical",
+				EventID:       "evt-" + tt.hardwareID,
+				Source:        contracts.SourceRef{HardwareID: "controller-" + tt.hardwareID},
+				Target:        contracts.TargetRef{Kind: "node", Value: tt.hardwareID},
+				Delivery:      &contracts.DeliverySpec{RouteClass: tt.routeClass},
+				Payload:       map[string]any{"payload_bytes": 4},
+			}
+			plan, err := router.PlanOutboundRoute(ctx, event)
+			if err != nil {
+				t.Fatalf("%s should be supported by route planner: %v", tt.routeClass, err)
+			}
+			if !plan.PayloadFit || plan.Bearer != tt.wantBearer || plan.RouteClass != tt.routeClass {
+				t.Fatalf("unexpected plan for %s: %+v", tt.routeClass, plan)
+			}
+			if plan.AllowRelay != tt.wantRelay || plan.AllowRedundant != tt.wantRedundant {
+				t.Fatalf("unexpected relay policy for %s: %+v", tt.routeClass, plan)
+			}
+			if tt.wantHopLimit != nil {
+				if plan.HopLimit == nil || *plan.HopLimit != *tt.wantHopLimit {
+					t.Fatalf("expected hop_limit=%d for %s, got %+v", *tt.wantHopLimit, tt.routeClass, plan)
+				}
+			}
+		})
+	}
+}
+
+func TestLoRaRelayOneHopUsesRelayedPayloadCap(t *testing.T) {
+	router := openTestRouter(t)
+	ctx := context.Background()
+	if err := router.UpsertManifest(ctx, "relay-hop-01", &contracts.Manifest{
+		HardwareID:          "relay-hop-01",
+		DeviceFamily:        "xiao-esp32s3-sx1262",
+		PowerClass:          "mains",
+		WakeClass:           "always_on",
+		SupportedBearers:    []string{"lora"},
+		AllowedNetworkRoles: []string{"lora_relay"},
+		Firmware:            map[string]any{"app": "0.1.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.UpsertLease(ctx, "relay-hop-01", &contracts.Lease{
+		RoleLeaseID:      "lease-relay-hop",
+		SiteID:           "site-a",
+		LogicalBindingID: "binding-relay-hop",
+		FabricShortID:    intPtr(302),
+		EffectiveRole:    "lora_relay",
+		PrimaryBearer:    "lora_relay",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ok := &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     "msg-relay-hop-ok",
+		Kind:          "fabric_summary",
+		Priority:      "normal",
+		Source:        contracts.SourceRef{HardwareID: "controller-relay-hop"},
+		Target:        contracts.TargetRef{Kind: "node", Value: "relay-hop-01"},
+		Delivery:      &contracts.DeliverySpec{RouteClass: "lora_relay_1"},
+		Payload:       map[string]any{"payload_bytes": 6, "final_target_short_id": 201},
+	}
+	plan, err := router.PlanOutboundRoute(ctx, ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.PayloadFit || plan.Bearer != "lora_relay" || plan.Detail["relayed"] != true ||
+		plan.Detail["relay_short_id"].(int) != 302 || plan.Detail["final_target_short_id"].(int64) != 201 {
+		t.Fatalf("unexpected relayed plan: %+v", plan)
+	}
+	tooLarge := *ok
+	tooLarge.MessageID = "msg-relay-hop-large"
+	tooLarge.Payload = map[string]any{"payload_bytes": 7}
+	plan, err = router.PlanOutboundRoute(ctx, &tooLarge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PayloadFit || plan.Reason != "lora_payload_too_large" {
+		t.Fatalf("expected relayed payload cap gate, got %+v", plan)
+	}
+}
+
 func TestLeasePrimaryBearerMustMatchManifest(t *testing.T) {
 	router := openTestRouter(t)
 	ctx := context.Background()
@@ -1332,6 +1601,48 @@ func TestRouteClassPolicyArtifactRelayDefaultsMatchPlanner(t *testing.T) {
 			t.Fatalf("%s relay defaults drifted from route-classes.json: plan relay=%t redundant=%t policy relay=%t redundant=%t",
 				routeClass, plan.AllowRelay, plan.AllowRedundant, policy.AllowRelay, policy.AllowRedundant)
 		}
+		if policy.HopLimit != nil {
+			if plan.HopLimit == nil || *plan.HopLimit != *policy.HopLimit {
+				t.Fatalf("%s hop limit drifted from route-classes.json: plan=%v policy=%d", routeClass, plan.HopLimit, *policy.HopLimit)
+			}
+		}
+	}
+}
+
+func TestRouteClassPolicyArtifactRequiredRolesAreEnforced(t *testing.T) {
+	artifact := loadRoutePolicyArtifact(t)
+	for routeClass, policy := range artifact.RouteClasses {
+		if len(policy.RequiresTargetRole) == 0 {
+			continue
+		}
+		router := openTestRouter(t)
+		hardwareID := "wrong-role-" + routeClass
+		bearer := primaryBearerForPolicyLabel(policy.AllowedBearers[0])
+		upsertPolicyNode(t, router, hardwareID, "powered_leaf", bearer, intPtr(620))
+		plan, err := router.PlanOutboundRoute(context.Background(), routePolicyEnvelope(routeClass, hardwareID, 4))
+		if err != nil {
+			continue
+		}
+		if plan.PayloadFit || (plan.Reason != "target_role_forbidden_by_route_class" && plan.Reason != "target_not_sleepy_leaf") {
+			t.Fatalf("%s must enforce requires_target_role, got %+v", routeClass, plan)
+		}
+	}
+}
+
+func TestWifiMeshBackboneHonorsExplicitHopLimit(t *testing.T) {
+	router := openTestRouter(t)
+	upsertPolicyNode(t, router, "mesh-router-01", "mesh_router", "wifi_mesh", intPtr(630))
+	hopCount := 1
+	hopLimit := 1
+	env := routePolicyEnvelope("wifi_mesh_backbone", "mesh-router-01", 4)
+	env.Delivery.HopLimit = &hopLimit
+	env.MeshMeta = &contracts.MeshMeta{HopCount: &hopCount}
+	plan, err := router.PlanOutboundRoute(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PayloadFit || plan.Reason != "relay_ttl_exhausted" {
+		t.Fatalf("expected wifi_mesh explicit hop limit to block exhausted path, got %+v", plan)
 	}
 }
 

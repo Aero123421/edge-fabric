@@ -410,10 +410,14 @@ func stableOnAirKey(packet *onair.Packet) string {
 	if packet == nil {
 		return ""
 	}
+	sourceShortID := packet.SourceShortID
+	if packet.Relay != nil && packet.Relay.OriginShortID != 0 {
+		sourceShortID = packet.Relay.OriginShortID
+	}
 	sum := sha256.Sum256(packet.Body)
 	return fmt.Sprintf(
 		"onair-v1:%d:%d:%d:%d:%x",
-		packet.SourceShortID,
+		sourceShortID,
 		packet.TargetShortID,
 		packet.Sequence,
 		packet.LogicalType,
@@ -433,7 +437,20 @@ func onairMeshMeta(packet *onair.Packet) *contracts.MeshMeta {
 		return nil
 	}
 	zeroHop := 0
-	return &contracts.MeshMeta{OnAirKey: key, HopCount: &zeroHop}
+	meta := &contracts.MeshMeta{OnAirKey: key, HopCount: &zeroHop}
+	if packet.Relay != nil {
+		origin := int(packet.Relay.OriginShortID)
+		previous := int(packet.Relay.PreviousHopShortID)
+		ttl := int(packet.Relay.TTL)
+		hopCount := int(packet.Relay.HopCount)
+		routeHint := int(packet.Relay.RouteHint)
+		meta.OriginShortID = &origin
+		meta.PreviousHopShortID = &previous
+		meta.TTL = &ttl
+		meta.HopCount = &hopCount
+		meta.RouteHint = &routeHint
+	}
+	return meta
 }
 
 func (a *Agent) seenRecentOnAirFrame(key string, now time.Time) bool {
@@ -500,6 +517,9 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 	occurredAt := receivedAt.Format(time.RFC3339Nano)
 	onairKey := stableOnAirKey(packet)
 	shortID := packet.SourceShortID
+	if packet.Relay != nil && packet.Relay.OriginShortID != 0 {
+		shortID = packet.Relay.OriginShortID
+	}
 	hardwareID := fmt.Sprintf("short:%d", shortID)
 	if resolver != nil && shortID != 0 {
 		resolved, err := resolver.ResolveHardwareIDByShortID(ctx, shortID)
@@ -509,6 +529,19 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 		if resolved != "" {
 			hardwareID = resolved
 		}
+	}
+	meshMeta := onairMeshMeta(packet)
+	annotateRelayPayload := func(payload map[string]any) map[string]any {
+		if packet.Relay == nil {
+			return payload
+		}
+		payload["relay_extension"] = true
+		payload["origin_short_id"] = int(packet.Relay.OriginShortID)
+		payload["previous_hop_short_id"] = int(packet.Relay.PreviousHopShortID)
+		payload["ttl"] = int(packet.Relay.TTL)
+		payload["hop_count"] = int(packet.Relay.HopCount)
+		payload["route_hint"] = int(packet.Relay.RouteHint)
+		return payload
 	}
 	switch packet.LogicalType {
 	case onair.TypeState:
@@ -525,8 +558,8 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 			OccurredAt:    occurredAt,
 			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "service", Value: "state"},
-			MeshMeta:      onairMeshMeta(packet),
-			Payload: map[string]any{
+			MeshMeta:      meshMeta,
+			Payload: annotateRelayPayload(map[string]any{
 				"state_key":       stateKeyFromToken(body.KeyToken),
 				"value":           stateValueFromToken(body.ValueToken),
 				"event_wake":      body.EventWake,
@@ -537,7 +570,7 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 				"target_short_id": packet.TargetShortID,
 				"onair_sequence":  packet.Sequence,
 				"onair_key":       onairKey,
-			},
+			}),
 		}, "", nil
 	case onair.TypeEvent:
 		body, err := onair.DecodeEvent(packet)
@@ -558,8 +591,8 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 			OccurredAt:    occurredAt,
 			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "service", Value: "alerts"},
-			MeshMeta:      onairMeshMeta(packet),
-			Payload: map[string]any{
+			MeshMeta:      meshMeta,
+			Payload: annotateRelayPayload(map[string]any{
 				"event_code":      int(body.EventCode),
 				"event_name":      eventNameFromToken(body.EventCode),
 				"severity":        eventSeverityFromToken(body.Severity),
@@ -574,7 +607,7 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 				"target_short_id": packet.TargetShortID,
 				"onair_sequence":  packet.Sequence,
 				"onair_key":       onairKey,
-			},
+			}),
 		}, "", nil
 	case onair.TypeCommandResult:
 		body, err := onair.DecodeCommandResult(packet)
@@ -609,8 +642,8 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 			OccurredAt:    occurredAt,
 			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "client", Value: "sleepy-node-sdk"},
-			MeshMeta:      onairMeshMeta(packet),
-			Payload: map[string]any{
+			MeshMeta:      meshMeta,
+			Payload: annotateRelayPayload(map[string]any{
 				"command_id":      commandID,
 				"command_token":   int(body.CommandToken),
 				"phase":           phase,
@@ -622,7 +655,7 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 				"target_short_id": packet.TargetShortID,
 				"onair_sequence":  packet.Sequence,
 				"onair_key":       onairKey,
-			},
+			}),
 		}, "", nil
 	case onair.TypePendingDigest:
 		body, err := onair.DecodePendingDigest(packet)
@@ -666,8 +699,8 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 			OccurredAt:    occurredAt,
 			Source:        contracts.SourceRef{HardwareID: hardwareID, FabricShortID: shortIDPtr(shortID)},
 			Target:        contracts.TargetRef{Kind: "host", Value: "site-router"},
-			MeshMeta:      onairMeshMeta(packet),
-			Payload: map[string]any{
+			MeshMeta:      meshMeta,
+			Payload: annotateRelayPayload(map[string]any{
 				"subject_kind":      "node",
 				"subject_id":        hardwareID,
 				"live":              true,
@@ -688,7 +721,7 @@ func decodeCompactSummaryEnvelope(ctx context.Context, resolver RuntimeResolver,
 				"target_short_id":   packet.TargetShortID,
 				"onair_sequence":    packet.Sequence,
 				"onair_key":         onairKey,
-			},
+			}),
 		}, "", nil
 	default:
 		return nil, "", errors.New("unsupported on-air logical type")
@@ -714,7 +747,7 @@ func controlHeartbeatEnvelope(hardwareID string, shortID uint16, packet *onair.P
 	payload["onair_key"] = stableOnAirKey(packet)
 	return &contracts.Envelope{
 		SchemaVersion: "1.0.0",
-		MessageID:     fmt.Sprintf("msg-heartbeat-%d", time.Now().UTC().UnixNano()),
+		MessageID:     fmt.Sprintf("msg-heartbeat-%d-%d-%d", packet.LogicalType, packet.Sequence, time.Now().UTC().UnixNano()),
 		Kind:          "heartbeat",
 		Priority:      "normal",
 		OccurredAt:    time.Now().UTC().Format(time.RFC3339Nano),

@@ -30,6 +30,33 @@ class ContractTests(unittest.TestCase):
             envelope = FabricEnvelope.from_dict(self._load_json(relative_path))
             self.assertEqual(envelope.schema_version, "1.0.0")
 
+    def test_mesh_meta_relay_extension_fields_parse(self) -> None:
+        envelope = FabricEnvelope.from_dict(
+            {
+                "schema_version": "1.0.0",
+                "message_id": "msg-relayed-event",
+                "kind": "event",
+                "priority": "critical",
+                "event_id": "evt-relayed",
+                "source": {"hardware_id": "short:201", "fabric_short_id": 201},
+                "target": {"kind": "service", "value": "alerts"},
+                "mesh_meta": {
+                    "origin_short_id": 201,
+                    "previous_hop_short_id": 302,
+                    "ttl": 2,
+                    "hop_count": 1,
+                    "route_hint": 9,
+                },
+                "payload": {"event_type": "motion_detected"},
+            }
+        )
+        self.assertIsNotNone(envelope.mesh_meta)
+        assert envelope.mesh_meta is not None
+        self.assertEqual(envelope.mesh_meta.origin_short_id, 201)
+        self.assertEqual(envelope.mesh_meta.previous_hop_short_id, 302)
+        self.assertEqual(envelope.mesh_meta.ttl, 2)
+        self.assertEqual(envelope.mesh_meta.route_hint, 9)
+
     def test_manifest_and_lease_parse(self) -> None:
         manifest = NodeManifest.from_dict(
             self._load_json("contracts/fixtures/manifest-sleepy-leaf.json")
@@ -91,7 +118,20 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(artifact["logical_types"]["3"]["name"], "command_result")
         self.assertEqual(artifact["logical_types"]["7"]["implementation_status"], "active")
         self.assertIn("sequence_semantics", artifact["header"])
-        self.assertEqual(artifact["relay_extension"]["implementation_status"], "planned")
+        self.assertEqual(artifact["flags"]["relay_extension"], 2)
+        self.assertEqual(artifact["relay_extension"]["implementation_status"], "active")
+        self.assertEqual(artifact["relay_extension"]["version"], "relay_extension_v1")
+        self.assertEqual(artifact["relay_extension"]["size_bytes"], 7)
+        self.assertEqual(
+            artifact["relay_extension"]["fields"],
+            [
+                "origin_short_id_le16",
+                "previous_hop_short_id_le16",
+                "ttl",
+                "hop_count",
+                "route_hint",
+            ],
+        )
         self.assertEqual(
             artifact["event"]["body_layout"],
             ["event_code:u8", "severity:u8", "value_bucket:u8", "flags:u8"],
@@ -146,6 +186,12 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(artifact["header"]["size_bytes"], c_value("EF_ONAIR_HEADER_SIZE"))
         self.assertEqual(artifact["flags"]["summary"], go_byte("FlagSummary"))
         self.assertEqual(artifact["flags"]["summary"], c_value("EF_ONAIR_FLAG_SUMMARY"))
+        self.assertEqual(artifact["flags"]["relay_extension"], go_byte("FlagRelayExt"))
+        self.assertEqual(artifact["flags"]["relay_extension"], c_value("EF_ONAIR_FLAG_RELAY_EXTENSION"))
+        relay_size = re.search(r"const\s+RelayExtensionSize\s*=\s*(\d+)", go_source)
+        self.assertIsNotNone(relay_size)
+        self.assertEqual(artifact["relay_extension"]["size_bytes"], int(relay_size.group(1)))
+        self.assertEqual(artifact["relay_extension"]["size_bytes"], c_value("EF_ONAIR_RELAY_EXTENSION_SIZE"))
 
         logical_go = {
             "1": go_byte("TypeState"),
@@ -365,6 +411,37 @@ class ContractTests(unittest.TestCase):
             for route_class in profile["default_routes"].values():
                 self.assertIn(route_class, routes["route_classes"])
 
+    def test_mesh_relay_route_classes_are_declared(self) -> None:
+        routes = self._load_json("contracts/policy/route-classes.json")["route_classes"]
+        expected = {
+            "lora_relay_1": {
+                "allowed_bearers": ["lora_relay"],
+                "allow_relay": True,
+                "allow_redundant": False,
+                "hop_limit": 1,
+            },
+            "wifi_mesh_backbone": {
+                "allowed_bearers": ["wifi_mesh"],
+                "allow_relay": True,
+                "allow_redundant": False,
+            },
+            "redundant_critical": {
+                "allowed_bearers": ["wifi", "wifi_ip", "wifi_mesh", "lora_direct", "lora_relay"],
+                "allow_relay": True,
+                "allow_redundant": True,
+                "hop_limit": 2,
+            },
+        }
+        for route_class, requirements in expected.items():
+            with self.subTest(route_class=route_class):
+                self.assertIn(route_class, routes)
+                policy = routes[route_class]
+                self.assertEqual(policy["allowed_bearers"], requirements["allowed_bearers"])
+                self.assertEqual(policy.get("allow_relay"), requirements["allow_relay"])
+                self.assertEqual(policy.get("allow_redundant"), requirements["allow_redundant"])
+                if "hop_limit" in requirements:
+                    self.assertEqual(policy.get("hop_limit"), requirements["hop_limit"])
+
     def test_fixture_route_classes_exist_in_policy_artifact(self) -> None:
         routes = self._load_json("contracts/policy/route-classes.json")["route_classes"]
         for fixture in (
@@ -414,7 +491,7 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(route_case, route_arg)
             allowed = re.findall(r'"([^"]+)"', allowed_expr)
             runtime_routes[route_case] = allowed
-            self.assertEqual("lora_direct" in allowed, allow_lora == "true")
+            self.assertEqual(any(value.startswith("lora") for value in allowed), allow_lora == "true")
 
         self.assertEqual(set(routes), set(runtime_routes))
         for route_class, policy in routes.items():

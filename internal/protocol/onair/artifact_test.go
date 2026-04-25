@@ -18,11 +18,20 @@ type artifactLogicalType struct {
 	ImplementationStatus string `json:"implementation_status"`
 }
 
+type artifactRelayExtension struct {
+	Version              string   `json:"version"`
+	ImplementationStatus string   `json:"implementation_status"`
+	SizeBytes            int      `json:"size_bytes"`
+	Fields               []string `json:"fields"`
+}
+
 type artifactFile struct {
-	Version      string                         `json:"version"`
-	Track        string                         `json:"track"`
-	Header       artifactHeader                 `json:"header"`
-	LogicalTypes map[string]artifactLogicalType `json:"logical_types"`
+	Version        string                         `json:"version"`
+	Track          string                         `json:"track"`
+	Header         artifactHeader                 `json:"header"`
+	Flags          map[string]int                 `json:"flags"`
+	LogicalTypes   map[string]artifactLogicalType `json:"logical_types"`
+	RelayExtension artifactRelayExtension         `json:"relay_extension"`
 }
 
 func TestOnAirArtifactStaysInSync(t *testing.T) {
@@ -45,6 +54,9 @@ func TestOnAirArtifactStaysInSync(t *testing.T) {
 	if artifact.Header.SizeBytes != HeaderSize {
 		t.Fatalf("artifact header size=%d code header size=%d", artifact.Header.SizeBytes, HeaderSize)
 	}
+	if artifact.Flags["relay_extension"] != int(FlagRelayExt) {
+		t.Fatalf("artifact relay flag=%d code relay flag=%d", artifact.Flags["relay_extension"], FlagRelayExt)
+	}
 	if artifact.LogicalTypes["1"].Name != "state" || artifact.LogicalTypes["1"].ImplementationStatus != "active" {
 		t.Fatalf("unexpected state entry: %+v", artifact.LogicalTypes["1"])
 	}
@@ -56,5 +68,10 @@ func TestOnAirArtifactStaysInSync(t *testing.T) {
 	}
 	if artifact.LogicalTypes["7"].Name != "heartbeat" || artifact.LogicalTypes["7"].ImplementationStatus != "active" {
 		t.Fatalf("unexpected heartbeat entry: %+v", artifact.LogicalTypes["7"])
+	}
+	if artifact.RelayExtension.Version != "relay_extension_v1" ||
+		artifact.RelayExtension.ImplementationStatus != "active" ||
+		artifact.RelayExtension.SizeBytes != RelayExtensionSize {
+		t.Fatalf("unexpected relay extension entry: %+v", artifact.RelayExtension)
 	}
 }

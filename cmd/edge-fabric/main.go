@@ -192,6 +192,7 @@ func decodeOnAir(args []string) error {
 		"logical_type":    packet.LogicalType,
 		"type_name":       typeName(packet.LogicalType),
 		"summary":         packet.Summary(),
+		"relay":           relayInfo(packet),
 		"sequence":        packet.Sequence,
 		"source_short_id": packet.SourceShortID,
 		"target_short_id": packet.TargetShortID,
@@ -234,6 +235,7 @@ func decodeUSBFrame(args []string) error {
 				"logical_type":    packet.LogicalType,
 				"type_name":       typeName(packet.LogicalType),
 				"summary":         packet.Summary(),
+				"relay":           relayInfo(packet),
 				"sequence":        packet.Sequence,
 				"source_short_id": packet.SourceShortID,
 				"target_short_id": packet.TargetShortID,
@@ -242,6 +244,19 @@ func decodeUSBFrame(args []string) error {
 		}
 	}
 	return printJSON(result)
+}
+
+func relayInfo(packet *onair.Packet) map[string]any {
+	if packet == nil || packet.Relay == nil {
+		return nil
+	}
+	return map[string]any{
+		"origin_short_id":       packet.Relay.OriginShortID,
+		"previous_hop_short_id": packet.Relay.PreviousHopShortID,
+		"ttl":                   packet.Relay.TTL,
+		"hop_count":             packet.Relay.HopCount,
+		"route_hint":            packet.Relay.RouteHint,
+	}
 }
 
 func decodeBody(packet *onair.Packet) (map[string]any, error) {

@@ -12,6 +12,7 @@ static uint16_t ef_read_le16(const uint8_t *src) {
 }
 
 esp_err_t ef_onair_decode_packet(const uint8_t *frame, size_t frame_len, ef_onair_packet_t *out_packet) {
+    size_t body_offset = EF_ONAIR_HEADER_SIZE;
     if (frame == NULL || out_packet == NULL || frame_len < (EF_ONAIR_HEADER_SIZE + 1u)) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -24,8 +25,21 @@ esp_err_t ef_onair_decode_packet(const uint8_t *frame, size_t frame_len, ef_onai
     out_packet->sequence = frame[3];
     out_packet->source_short_id = ef_read_le16(&frame[4]);
     out_packet->target_short_id = ef_read_le16(&frame[6]);
-    out_packet->body = &frame[EF_ONAIR_HEADER_SIZE];
-    out_packet->body_len = frame_len - EF_ONAIR_HEADER_SIZE;
+    out_packet->has_relay = false;
+    if ((out_packet->flags & EF_ONAIR_FLAG_RELAY_EXTENSION) != 0u) {
+        if (frame_len < (EF_ONAIR_HEADER_SIZE + EF_ONAIR_RELAY_EXTENSION_SIZE + 1u)) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        out_packet->has_relay = true;
+        out_packet->relay.origin_short_id = ef_read_le16(&frame[8]);
+        out_packet->relay.previous_hop_short_id = ef_read_le16(&frame[10]);
+        out_packet->relay.ttl = frame[12];
+        out_packet->relay.hop_count = frame[13];
+        out_packet->relay.route_hint = frame[14];
+        body_offset += EF_ONAIR_RELAY_EXTENSION_SIZE;
+    }
+    out_packet->body = &frame[body_offset];
+    out_packet->body_len = frame_len - body_offset;
     return ESP_OK;
 }
 
@@ -41,18 +55,70 @@ esp_err_t ef_onair_encode_packet(
     if (packet->version != 0u && packet->version != EF_ONAIR_VERSION) {
         return ESP_ERR_INVALID_VERSION;
     }
+    if (!packet->has_relay && (packet->flags & EF_ONAIR_FLAG_RELAY_EXTENSION) != 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (packet->has_relay && packet->relay.ttl == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
     frame_len = EF_ONAIR_HEADER_SIZE + packet->body_len;
+    if (packet->has_relay) {
+        frame_len += EF_ONAIR_RELAY_EXTENSION_SIZE;
+    }
     if (frame_len > out_buf_cap) {
         return ESP_ERR_INVALID_SIZE;
     }
     out_buf[0] = packet->version == 0u ? EF_ONAIR_VERSION : packet->version;
     out_buf[1] = packet->logical_type;
-    out_buf[2] = packet->flags;
+    out_buf[2] = packet->has_relay ? (packet->flags | EF_ONAIR_FLAG_RELAY_EXTENSION) : packet->flags;
     out_buf[3] = packet->sequence;
     ef_write_le16(&out_buf[4], packet->source_short_id);
     ef_write_le16(&out_buf[6], packet->target_short_id);
-    memcpy(&out_buf[EF_ONAIR_HEADER_SIZE], packet->body, packet->body_len);
+    size_t body_offset = EF_ONAIR_HEADER_SIZE;
+    if (packet->has_relay) {
+        ef_write_le16(&out_buf[8], packet->relay.origin_short_id);
+        ef_write_le16(&out_buf[10], packet->relay.previous_hop_short_id);
+        out_buf[12] = packet->relay.ttl;
+        out_buf[13] = packet->relay.hop_count;
+        out_buf[14] = packet->relay.route_hint;
+        body_offset += EF_ONAIR_RELAY_EXTENSION_SIZE;
+    }
+    memcpy(&out_buf[body_offset], packet->body, packet->body_len);
     *out_len = frame_len;
+    return ESP_OK;
+}
+
+esp_err_t ef_onair_build_relay_forward(
+    const ef_onair_packet_t *packet,
+    uint16_t relay_short_id,
+    ef_onair_packet_t *out_packet) {
+    uint16_t origin_short_id;
+    uint8_t ttl = 2u;
+    uint8_t hop_count = 0u;
+    uint8_t route_hint = 0u;
+    if (packet == NULL || out_packet == NULL || packet->body == NULL || packet->body_len == 0u ||
+        relay_short_id == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    origin_short_id = packet->source_short_id;
+    if (packet->has_relay) {
+        origin_short_id = packet->relay.origin_short_id;
+        ttl = packet->relay.ttl;
+        hop_count = packet->relay.hop_count;
+        route_hint = packet->relay.route_hint;
+    }
+    if (origin_short_id == 0u || ttl <= 1u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_packet = *packet;
+    out_packet->flags |= EF_ONAIR_FLAG_RELAY_EXTENSION;
+    out_packet->source_short_id = relay_short_id;
+    out_packet->has_relay = true;
+    out_packet->relay.origin_short_id = origin_short_id;
+    out_packet->relay.previous_hop_short_id = relay_short_id;
+    out_packet->relay.ttl = (uint8_t)(ttl - 1u);
+    out_packet->relay.hop_count = (uint8_t)(hop_count + 1u);
+    out_packet->relay.route_hint = route_hint;
     return ESP_OK;
 }
 
@@ -65,7 +131,7 @@ esp_err_t ef_onair_encode_state(
     size_t out_buf_cap,
     size_t *out_len) {
     uint8_t payload[3];
-    ef_onair_packet_t packet;
+    ef_onair_packet_t packet = {0};
     if (body == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -102,7 +168,7 @@ esp_err_t ef_onair_encode_event(
     size_t out_buf_cap,
     size_t *out_len) {
     uint8_t payload[4];
-    ef_onair_packet_t packet;
+    ef_onair_packet_t packet = {0};
     if (body == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -141,7 +207,7 @@ esp_err_t ef_onair_encode_command_result(
     size_t out_buf_cap,
     size_t *out_len) {
     uint8_t payload[4];
-    ef_onair_packet_t packet;
+    ef_onair_packet_t packet = {0};
     if (body == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -181,7 +247,7 @@ esp_err_t ef_onair_encode_pending_digest(
     size_t out_buf_cap,
     size_t *out_len) {
     uint8_t payload[2];
-    ef_onair_packet_t packet;
+    ef_onair_packet_t packet = {0};
     if (body == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -218,7 +284,7 @@ esp_err_t ef_onair_encode_tiny_poll(
     size_t out_buf_cap,
     size_t *out_len) {
     uint8_t payload[1];
-    ef_onair_packet_t packet;
+    ef_onair_packet_t packet = {0};
     if (body == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -252,7 +318,7 @@ esp_err_t ef_onair_encode_compact_command(
     size_t out_buf_cap,
     size_t *out_len) {
     uint8_t payload[5];
-    ef_onair_packet_t packet;
+    ef_onair_packet_t packet = {0};
     if (body == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -294,7 +360,7 @@ esp_err_t ef_onair_encode_heartbeat(
     size_t out_buf_cap,
     size_t *out_len) {
     uint8_t payload[5];
-    ef_onair_packet_t packet;
+    ef_onair_packet_t packet = {0};
     if (body == NULL) {
         return ESP_ERR_INVALID_ARG;
     }

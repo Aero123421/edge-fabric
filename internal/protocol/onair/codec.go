@@ -9,7 +9,8 @@ import (
 const (
 	Version byte = 1
 
-	FlagSummary byte = 1 << 0
+	FlagSummary  byte = 1 << 0
+	FlagRelayExt byte = 1 << 1
 
 	TypeState          byte = 1
 	TypeEvent          byte = 2
@@ -74,6 +75,7 @@ const (
 )
 
 const HeaderSize = 8
+const RelayExtensionSize = 7
 
 type Packet struct {
 	Version       byte
@@ -82,7 +84,16 @@ type Packet struct {
 	Sequence      byte
 	SourceShortID uint16
 	TargetShortID uint16
+	Relay         *RelayExtension
 	Body          []byte
+}
+
+type RelayExtension struct {
+	OriginShortID      uint16
+	PreviousHopShortID uint16
+	TTL                byte
+	HopCount           byte
+	RouteHint          byte
 }
 
 type StateBody struct {
@@ -138,14 +149,34 @@ func Encode(packet Packet) ([]byte, error) {
 	if len(packet.Body) == 0 {
 		return nil, errors.New("on-air body is required")
 	}
-	out := make([]byte, HeaderSize+len(packet.Body))
+	if packet.Relay == nil && packet.Flags&FlagRelayExt != 0 {
+		return nil, errors.New("relay extension flag requires relay metadata")
+	}
+	relaySize := 0
+	if packet.Relay != nil {
+		if packet.Relay.TTL == 0 {
+			return nil, errors.New("relay extension ttl exhausted")
+		}
+		packet.Flags |= FlagRelayExt
+		relaySize = RelayExtensionSize
+	}
+	out := make([]byte, HeaderSize+relaySize+len(packet.Body))
 	out[0] = packet.Version
 	out[1] = packet.LogicalType
 	out[2] = packet.Flags
 	out[3] = packet.Sequence
 	binary.LittleEndian.PutUint16(out[4:6], packet.SourceShortID)
 	binary.LittleEndian.PutUint16(out[6:8], packet.TargetShortID)
-	copy(out[8:], packet.Body)
+	bodyOffset := HeaderSize
+	if packet.Relay != nil {
+		binary.LittleEndian.PutUint16(out[8:10], packet.Relay.OriginShortID)
+		binary.LittleEndian.PutUint16(out[10:12], packet.Relay.PreviousHopShortID)
+		out[12] = packet.Relay.TTL
+		out[13] = packet.Relay.HopCount
+		out[14] = packet.Relay.RouteHint
+		bodyOffset += RelayExtensionSize
+	}
+	copy(out[bodyOffset:], packet.Body)
 	return out, nil
 }
 
@@ -160,16 +191,71 @@ func Decode(frame []byte) (*Packet, error) {
 		Sequence:      frame[3],
 		SourceShortID: binary.LittleEndian.Uint16(frame[4:6]),
 		TargetShortID: binary.LittleEndian.Uint16(frame[6:8]),
-		Body:          append([]byte(nil), frame[8:]...),
 	}
 	if packet.Version != Version {
 		return nil, fmt.Errorf("unsupported on-air version: %d", packet.Version)
 	}
+	bodyOffset := HeaderSize
+	if packet.RelayExtension() {
+		if len(frame) < HeaderSize+RelayExtensionSize+1 {
+			return nil, errors.New("on-air relay extension frame too short")
+		}
+		packet.Relay = &RelayExtension{
+			OriginShortID:      binary.LittleEndian.Uint16(frame[8:10]),
+			PreviousHopShortID: binary.LittleEndian.Uint16(frame[10:12]),
+			TTL:                frame[12],
+			HopCount:           frame[13],
+			RouteHint:          frame[14],
+		}
+		bodyOffset += RelayExtensionSize
+	}
+	packet.Body = append([]byte(nil), frame[bodyOffset:]...)
 	return packet, nil
 }
 
 func (p *Packet) Summary() bool {
 	return p != nil && (p.Flags&FlagSummary) != 0
+}
+
+func (p *Packet) RelayExtension() bool {
+	return p != nil && (p.Flags&FlagRelayExt) != 0
+}
+
+func BuildRelayForward(packet *Packet, relayShortID uint16) (*Packet, error) {
+	if packet == nil {
+		return nil, errors.New("relay forward requires packet")
+	}
+	if relayShortID == 0 {
+		return nil, errors.New("relay forward requires relay short id")
+	}
+	originShortID := packet.SourceShortID
+	ttl := byte(2)
+	hopCount := byte(0)
+	routeHint := byte(0)
+	if packet.Relay != nil {
+		originShortID = packet.Relay.OriginShortID
+		ttl = packet.Relay.TTL
+		hopCount = packet.Relay.HopCount
+		routeHint = packet.Relay.RouteHint
+	}
+	if originShortID == 0 {
+		return nil, errors.New("relay forward requires origin short id")
+	}
+	if ttl <= 1 {
+		return nil, errors.New("relay ttl exhausted")
+	}
+	forwarded := *packet
+	forwarded.Flags |= FlagRelayExt
+	forwarded.SourceShortID = relayShortID
+	forwarded.Body = append([]byte(nil), packet.Body...)
+	forwarded.Relay = &RelayExtension{
+		OriginShortID:      originShortID,
+		PreviousHopShortID: relayShortID,
+		TTL:                ttl - 1,
+		HopCount:           hopCount + 1,
+		RouteHint:          routeHint,
+	}
+	return &forwarded, nil
 }
 
 func EncodeState(sourceShortID uint16, summary bool, sequence byte, body StateBody) ([]byte, error) {

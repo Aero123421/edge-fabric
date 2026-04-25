@@ -1272,6 +1272,7 @@ func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Enve
 		if info.Lease == nil || info.Lease.EffectiveRole != "sleepy_leaf" {
 			plan.Bearer = bearerLabel(info.Lease)
 			plan.PathLabel = "maintenance/non_sleepy"
+			plan.PayloadFit = false
 			plan.Reason = "target_not_sleepy_leaf"
 			return plan, nil
 		}
@@ -1288,6 +1289,12 @@ func (r *Router) PlanOutboundRoute(ctx context.Context, envelope *contracts.Enve
 		return r.planPolicyRoute(envelope, plan, info, "bulk_wifi_only", []string{"wifi", "wifi_ip", "wifi_mesh"}, false), nil
 	case "critical_alert":
 		return r.planPolicyRoute(envelope, plan, info, "critical_alert", []string{"wifi", "wifi_ip", "lora_direct"}, true), nil
+	case "redundant_critical":
+		return r.planPolicyRoute(envelope, plan, info, "redundant_critical", []string{"wifi", "wifi_ip", "wifi_mesh", "lora_direct", "lora_relay"}, true), nil
+	case "lora_relay_1":
+		return r.planPolicyRoute(envelope, plan, info, "lora_relay_1", []string{"lora_relay"}, true), nil
+	case "wifi_mesh_backbone":
+		return r.planPolicyRoute(envelope, plan, info, "wifi_mesh_backbone", []string{"wifi_mesh"}, false), nil
 	case "sparse_summary":
 		return r.planPolicyRoute(envelope, plan, info, "sparse_summary", []string{"lora_direct", "wifi", "wifi_ip"}, true), nil
 	case "sleepy_heartbeat":
@@ -1307,8 +1314,24 @@ func applyRouteClassDefaults(plan *RoutePlan, delivery *contracts.DeliverySpec) 
 	}
 	if delivery == nil || delivery.AllowRedundant == nil {
 		switch plan.RouteClass {
-		case "critical_alert":
+		case "critical_alert", "redundant_critical":
 			plan.AllowRedundant = true
+		}
+	}
+	if delivery == nil || delivery.AllowRelay == nil {
+		switch plan.RouteClass {
+		case "lora_relay_1", "wifi_mesh_backbone", "redundant_critical":
+			plan.AllowRelay = true
+		}
+	}
+	if delivery == nil || delivery.HopLimit == nil {
+		switch plan.RouteClass {
+		case "lora_relay_1":
+			hopLimit := 1
+			plan.HopLimit = &hopLimit
+		case "redundant_critical":
+			hopLimit := 2
+			plan.HopLimit = &hopLimit
 		}
 	}
 }
@@ -1326,6 +1349,17 @@ func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, 
 		plan.Reason = "lease_missing"
 		plan.Detail["allowed_bearers"] = allowedBearers
 		return plan
+	}
+	if !routeClassAllowsTargetRole(routeClass, info) {
+		plan.PayloadFit = false
+		plan.Reason = "target_role_forbidden_by_route_class"
+		plan.Detail["route_class"] = routeClass
+		plan.Detail["target_role"] = leaseRole(info)
+		plan.Detail["requires_target_role"] = requiredRolesForRouteClass(routeClass)
+		return plan
+	}
+	if envelope.MeshMeta != nil && envelope.MeshMeta.HopCount != nil {
+		plan.Detail["current_hop_count"] = *envelope.MeshMeta.HopCount
 	}
 	applyRouteIntentToPlan(plan, bearer)
 	if !plan.PayloadFit {
@@ -1351,17 +1385,26 @@ func (r *Router) planPolicyRoute(envelope *contracts.Envelope, plan *RoutePlan, 
 			plan.Reason = "lora_requires_compact_payload"
 			return plan
 		}
-		cap, err := jp.BodyCapForProfile(jpProfilePath(), "JP125_LONG_SF10", false)
+		relayed := bearerIsRelay(bearer)
+		cap, err := jp.BodyCapForProfile(jpProfilePath(), "JP125_LONG_SF10", relayed)
 		if err == nil && bytes > cap {
 			plan.PayloadFit = false
 			plan.Reason = "lora_payload_too_large"
 			plan.Detail["payload_bytes"] = bytes
 			plan.Detail["cap_bytes"] = cap
+			plan.Detail["relayed"] = relayed
 			return plan
 		}
 		plan.Detail["payload_bytes"] = bytes
 		plan.Detail["payload_fit_source"] = source
 		plan.Detail["profile"] = "JP125_LONG_SF10"
+		plan.Detail["relayed"] = relayed
+		if relayed && info != nil && info.Lease != nil && info.Lease.FabricShortID != nil {
+			plan.Detail["relay_short_id"] = *info.Lease.FabricShortID
+			if finalTarget := payloadInt64(envelope.Payload, "final_target_short_id"); finalTarget != nil {
+				plan.Detail["final_target_short_id"] = *finalTarget
+			}
+		}
 	}
 	return plan
 }
@@ -2373,6 +2416,10 @@ func bearerIsRelay(bearer string) bool {
 	return bearer == "lora_relay" || bearer == "lora_mesh"
 }
 
+func bearerUsesHopLimit(bearer string) bool {
+	return bearerIsRelay(bearer) || bearer == "wifi_mesh"
+}
+
 func applyRouteIntentToPlan(plan *RoutePlan, bearer string) {
 	if plan == nil {
 		return
@@ -2380,11 +2427,20 @@ func applyRouteIntentToPlan(plan *RoutePlan, bearer string) {
 	plan.Detail["selected_bearer"] = bearer
 	plan.Detail["relay_requested"] = plan.AllowRelay
 	plan.Detail["redundant_requested"] = plan.AllowRedundant
+	if plan.AllowRedundant {
+		plan.Detail["redundant_candidates"] = []string{"primary", "lora_direct", "wifi_ip", "wifi_mesh"}
+		plan.Detail["redundant_delivery_mode"] = "route_plan_candidates"
+	}
 	if plan.HopLimit != nil {
 		plan.Detail["hop_limit"] = *plan.HopLimit
-		if *plan.HopLimit == 0 && bearerIsRelay(bearer) {
+		if *plan.HopLimit == 0 && bearerUsesHopLimit(bearer) {
 			plan.PayloadFit = false
 			plan.Reason = "relay_forbidden_by_hop_limit"
+			return
+		}
+		if plan.AllowRelay && bearerUsesHopLimit(bearer) && deliveryHopCount(plan) >= *plan.HopLimit {
+			plan.PayloadFit = false
+			plan.Reason = "relay_ttl_exhausted"
 			return
 		}
 	}
@@ -2392,6 +2448,16 @@ func applyRouteIntentToPlan(plan *RoutePlan, bearer string) {
 		plan.PayloadFit = false
 		plan.Reason = "relay_forbidden_by_delivery_policy"
 	}
+}
+
+func deliveryHopCount(plan *RoutePlan) int {
+	if plan == nil {
+		return 0
+	}
+	if value, ok := plan.Detail["current_hop_count"].(int); ok {
+		return value
+	}
+	return 0
 }
 
 func bearerAllowedByPolicy(bearer string, allowed []string, allowRelay bool) bool {
@@ -2404,6 +2470,40 @@ func bearerAllowedByPolicy(bearer string, allowed []string, allowRelay bool) boo
 		}
 	}
 	return false
+}
+
+func routeClassAllowsTargetRole(routeClass string, info *NodeRuntimeInfo) bool {
+	required := requiredRolesForRouteClass(routeClass)
+	if len(required) == 0 {
+		return true
+	}
+	role := leaseRole(info)
+	for _, candidate := range required {
+		if role == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func leaseRole(info *NodeRuntimeInfo) string {
+	if info == nil || info.Lease == nil {
+		return ""
+	}
+	return info.Lease.EffectiveRole
+}
+
+func requiredRolesForRouteClass(routeClass string) []string {
+	switch routeClass {
+	case "sleepy_tiny_control", "maintenance_sync", "sleepy_heartbeat":
+		return []string{"sleepy_leaf"}
+	case "lora_relay_1":
+		return []string{"lora_relay"}
+	case "wifi_mesh_backbone":
+		return []string{"mesh_router", "mesh_root", "dual_bearer_bridge"}
+	default:
+		return nil
+	}
 }
 
 func routeStatusForPlan(plan *RoutePlan) string {
@@ -2532,6 +2632,9 @@ func payloadBool(payload map[string]any, key string) bool {
 func envelopeOnAirKey(envelope *contracts.Envelope) string {
 	if envelope == nil {
 		return ""
+	}
+	if originKey := payloadString(envelope.Payload, "origin_onair_key"); originKey != "" {
+		return originKey
 	}
 	if envelope.MeshMeta != nil && envelope.MeshMeta.OnAirKey != "" {
 		return envelope.MeshMeta.OnAirKey

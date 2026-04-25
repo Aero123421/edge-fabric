@@ -132,3 +132,111 @@ func TestHeartbeatRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected heartbeat body: %+v", body)
 	}
 }
+
+func TestRelayExtensionRoundTrip(t *testing.T) {
+	raw, err := Encode(Packet{
+		LogicalType:   TypeEvent,
+		Sequence:      42,
+		SourceShortID: 302,
+		TargetShortID: 1,
+		Relay: &RelayExtension{
+			OriginShortID:      201,
+			PreviousHopShortID: 302,
+			TTL:                2,
+			HopCount:           1,
+			RouteHint:          7,
+		},
+		Body: []byte{EventCodeMotionDetected, EventSeverityCritical, 4, EventFlagEventWake},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != HeaderSize+RelayExtensionSize+4 {
+		t.Fatalf("unexpected relay frame size %d", len(raw))
+	}
+	packet, err := Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !packet.RelayExtension() || packet.Relay == nil {
+		t.Fatalf("expected relay extension, got %+v", packet)
+	}
+	if packet.SourceShortID != 302 || packet.Relay.OriginShortID != 201 ||
+		packet.Relay.PreviousHopShortID != 302 || packet.Relay.TTL != 2 ||
+		packet.Relay.HopCount != 1 || packet.Relay.RouteHint != 7 {
+		t.Fatalf("unexpected relay extension: %+v", packet.Relay)
+	}
+	body, err := DecodeEvent(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.EventCode != EventCodeMotionDetected || body.Severity != EventSeverityCritical {
+		t.Fatalf("unexpected relayed event body: %+v", body)
+	}
+}
+
+func TestBuildRelayForwardUpdatesHopState(t *testing.T) {
+	raw, err := EncodeEvent(201, false, 77, EventBody{
+		EventCode:   EventCodeLeakDetected,
+		Severity:    EventSeverityCritical,
+		ValueBucket: 2,
+		Flags:       EventFlagEventWake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet.Relay = &RelayExtension{OriginShortID: 201, TTL: 2, RouteHint: 5}
+	forwarded, err := BuildRelayForward(packet, 302)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forwarded.SourceShortID != 302 || forwarded.Relay == nil ||
+		forwarded.Relay.OriginShortID != 201 || forwarded.Relay.PreviousHopShortID != 302 ||
+		forwarded.Relay.TTL != 1 || forwarded.Relay.HopCount != 1 || forwarded.Relay.RouteHint != 5 {
+		t.Fatalf("unexpected forwarded packet: %+v relay=%+v", forwarded, forwarded.Relay)
+	}
+	if _, err := BuildRelayForward(&Packet{SourceShortID: 201, Relay: &RelayExtension{OriginShortID: 201, TTL: 0}, Body: []byte{1}}, 302); err == nil {
+		t.Fatal("expected ttl exhausted error")
+	}
+	if _, err := BuildRelayForward(&Packet{SourceShortID: 201, Relay: &RelayExtension{OriginShortID: 201, TTL: 1}, Body: []byte{1}}, 302); err == nil {
+		t.Fatal("expected ttl=1 to be exhausted before another forward")
+	}
+}
+
+func TestRelayExtensionRejectsExhaustedTTL(t *testing.T) {
+	_, err := Encode(Packet{
+		LogicalType:   TypeEvent,
+		Sequence:      43,
+		SourceShortID: 302,
+		TargetShortID: 1,
+		Relay: &RelayExtension{
+			OriginShortID:      201,
+			PreviousHopShortID: 302,
+			TTL:                0,
+			HopCount:           2,
+			RouteHint:          7,
+		},
+		Body: []byte{EventCodeMotionDetected, EventSeverityCritical, 4, EventFlagEventWake},
+	})
+	if err == nil {
+		t.Fatal("relay_extension_v1 must reject frames whose ttl is already exhausted before forwarding")
+	}
+}
+
+func TestRelayExtensionFlagRequiresMetadata(t *testing.T) {
+	_, err := Encode(Packet{
+		LogicalType:   TypeEvent,
+		Flags:         FlagRelayExt,
+		Sequence:      44,
+		SourceShortID: 201,
+		TargetShortID: 1,
+		Body:          []byte{EventCodeMotionDetected, EventSeverityCritical, 4, EventFlagEventWake},
+	})
+	if err == nil {
+		t.Fatal("expected relay extension flag without relay metadata to fail encode")
+	}
+}
