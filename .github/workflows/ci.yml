@@ -1,5 +1,12 @@
 name: ci
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
   pull_request:
@@ -25,6 +32,8 @@ jobs:
         run: python scripts/demo_local_router.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
+      - name: Contract tests
+        run: python -m unittest tests/test_contracts.py -v
   go-test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -39,10 +48,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.4"
+      - name: Go fmt check
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          unformatted="$(git ls-files '*.go' | xargs gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
       - name: Doctor (Go strict)
         run: python scripts/doctor.py --require-go
       - name: Go tests
         run: go test ./...
+      - name: Go race tests
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race ./internal/... ./pkg/...
       - name: Go command builds
         run: go build ./cmd/...
       - name: Sleepy cycle demo
@@ -52,9 +72,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app:
-          - firmware/esp-idf/gateway-head
-          - firmware/esp-idf/node-sdk
+        include:
+          - app: firmware/esp-idf/gateway-head
+            target: gateway-head
+            profile: default
+          - app: firmware/esp-idf/gateway-head
+            target: gateway-head
+            profile: strict
+          - app: firmware/esp-idf/node-sdk
+            target: node-sdk
+            profile: default
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -69,14 +96,32 @@ jobs:
       - name: Build firmware app
         working-directory: ${{ matrix.app }}
         run: |
-          idf.py set-target esp32s3
-          idf.py build
-      - name: Build gateway strict real backend config
-        if: matrix.app == 'firmware/esp-idf/gateway-head'
-        working-directory: ${{ matrix.app }}
+          if [ "${{ matrix.profile }}" = "strict" ]; then
+            cp sdkconfig sdkconfig.strict
+            printf '\nCONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS=y\n' >> sdkconfig.strict
+            idf.py fullclean
+            idf.py -D SDKCONFIG=sdkconfig.strict set-target esp32s3
+            idf.py -D SDKCONFIG=sdkconfig.strict build | tee build-${{ matrix.profile }}.log
+          else
+            idf.py set-target esp32s3
+            idf.py build | tee build-${{ matrix.profile }}.log
+          fi
+      - name: Collect firmware artifacts
+        if: always()
         run: |
-          cp sdkconfig sdkconfig.strict
-          printf '\nCONFIG_EDGE_FABRIC_REQUIRE_REAL_BACKENDS=y\n' >> sdkconfig.strict
-          idf.py fullclean
-          idf.py -D SDKCONFIG=sdkconfig.strict set-target esp32s3
-          idf.py -D SDKCONFIG=sdkconfig.strict build
+          artifact_dir="artifacts/firmware/${{ matrix.target }}-${{ matrix.profile }}"
+          mkdir -p "$artifact_dir"
+          cp "${{ matrix.app }}"/build/${{ matrix.target }}.bin "$artifact_dir/" 2>/dev/null || true
+          cp "${{ matrix.app }}"/build/*.bin "$artifact_dir/" 2>/dev/null || true
+          cp "${{ matrix.app }}"/build/*.elf "$artifact_dir/" 2>/dev/null || true
+          cp "${{ matrix.app }}"/build/*.map "$artifact_dir/" 2>/dev/null || true
+          cp "${{ matrix.app }}"/build/*.json "$artifact_dir/" 2>/dev/null || true
+          cp "${{ matrix.app }}"/sdkconfig "$artifact_dir/" 2>/dev/null || true
+          cp "${{ matrix.app }}"/sdkconfig.strict "$artifact_dir/" 2>/dev/null || true
+          cp "${{ matrix.app }}"/build-${{ matrix.profile }}.log "$artifact_dir/" 2>/dev/null || true
+      - name: Upload firmware artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.target }}-${{ matrix.profile }}
+          path: artifacts/firmware/${{ matrix.target }}-${{ matrix.profile }}/

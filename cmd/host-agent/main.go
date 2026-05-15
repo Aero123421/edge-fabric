@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/Aero123421/edge-fabric/internal/hostagent"
 	"github.com/Aero123421/edge-fabric/internal/siterouter"
@@ -21,17 +22,26 @@ func main() {
 
 func run() error {
 	var (
-		dbPath    = flag.String("db", "site-router.db", "SQLite database path")
-		spoolPath = flag.String("spool", "host-agent-spool.jsonl", "host-agent spool path")
-		maxRetry  = flag.Int("max-retry", 3, "max outbound retry count before dead-letter")
-		mode      = flag.String("mode", "direct-json", "relay mode: direct-json|usb-envelope-json|usb-frame-binary|heartbeat-json|flush-spool|diagnostics")
-		inputPath = flag.String("input", "", "input file path")
-		ingressID = flag.String("ingress-id", "local-host-agent", "ingress id")
-		sessionID = flag.String("session-id", "session-local-001", "session id")
+		dbPath     = flag.String("db", "site-router.db", "SQLite database path")
+		spoolPath  = flag.String("spool", "host-agent-spool.jsonl", "host-agent spool path")
+		maxRetry   = flag.Int("max-retry", 3, "max outbound retry count before dead-letter")
+		mode       = flag.String("mode", "direct-json", "relay mode: direct-json|usb-envelope-json|usb-frame-binary|heartbeat-json|flush-spool|diagnostics|dispatch-once")
+		inputPath  = flag.String("input", "", "input file path")
+		ingressID  = flag.String("ingress-id", "local-host-agent", "ingress id")
+		sessionID  = flag.String("session-id", "session-local-001", "session id")
+		workerID   = flag.String("worker-id", "host-agent", "outbound worker id")
+		transport  = flag.String("transport", "fake", "egress transport: fake")
+		fakeStatus = flag.String(
+			"fake-status",
+			hostagent.TransportStatusAcked,
+			"fake transport result: acked|sent|retry|permanent_failure",
+		)
+		dispatchLimit = flag.Int("dispatch-limit", 1, "maximum outbound queue items to lease")
+		leaseDuration = flag.Duration("lease-duration", 30*time.Second, "outbound queue lease duration")
 	)
 	flag.Parse()
 
-	if *inputPath == "" && *mode != "flush-spool" && *mode != "diagnostics" {
+	if *inputPath == "" && *mode != "flush-spool" && *mode != "diagnostics" && *mode != "dispatch-once" {
 		return fmt.Errorf("-input is required")
 	}
 
@@ -56,6 +66,7 @@ func run() error {
 	agent := hostagent.New(router, *spoolPath)
 
 	var relayResult *hostagent.RelayResult
+	var dispatchResult *hostagent.EgressRunResult
 	switch *mode {
 	case "direct-json":
 		envelope, err := contracts.LoadEnvelope(*inputPath)
@@ -114,6 +125,22 @@ func run() error {
 			"flushed":     flushed,
 			"diagnostics": diagnostics,
 		})
+	case "dispatch-once":
+		if *transport != "fake" {
+			return fmt.Errorf("unsupported egress transport: %s", *transport)
+		}
+		fake, err := fakeTransportForStatus(*fakeStatus)
+		if err != nil {
+			return err
+		}
+		dispatchResult, err = agent.DispatchOutboundOnce(ctx, fake, hostagent.EgressConfig{
+			WorkerID:      *workerID,
+			Limit:         *dispatchLimit,
+			LeaseDuration: *leaseDuration,
+		})
+		if err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unsupported mode: %s", *mode)
 	}
@@ -122,10 +149,43 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if dispatchResult != nil {
+		return printJSON(map[string]any{
+			"dispatch":    dispatchResult,
+			"diagnostics": diagnostics,
+		})
+	}
 	return printJSON(map[string]any{
 		"result":      relayResult,
 		"diagnostics": diagnostics,
 	})
+}
+
+func fakeTransportForStatus(status string) (*hostagent.FakeTransport, error) {
+	switch status {
+	case hostagent.TransportStatusAcked:
+		return hostagent.NewFakeTransport(hostagent.FakeTransportStep{
+			Result: &hostagent.TransportResult{Status: hostagent.TransportStatusAcked, Acked: true, AckPhase: "fake_ack"},
+		}), nil
+	case hostagent.TransportStatusSent:
+		return hostagent.NewFakeTransport(hostagent.FakeTransportStep{
+			Result: &hostagent.TransportResult{Status: hostagent.TransportStatusSent},
+		}), nil
+	case hostagent.TransportStatusRetry:
+		return hostagent.NewFakeTransport(hostagent.FakeTransportStep{
+			Result: &hostagent.TransportResult{Status: hostagent.TransportStatusRetry, Retryable: true, Detail: map[string]any{"reason": "fake_retry"}},
+		}), nil
+	case hostagent.TransportStatusPermanentFailure:
+		return hostagent.NewFakeTransport(hostagent.FakeTransportStep{
+			Result: &hostagent.TransportResult{
+				Status:           hostagent.TransportStatusPermanentFailure,
+				PermanentFailure: true,
+				Detail:           map[string]any{"reason": "fake_permanent_failure"},
+			},
+		}), nil
+	default:
+		return nil, fmt.Errorf("unsupported fake status: %s", status)
+	}
 }
 
 func loadGenericJSON(path string) (map[string]any, error) {

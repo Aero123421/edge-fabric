@@ -15,6 +15,7 @@ typedef enum {
     EF_USB_FRAME_HEARTBEAT_JSON = 2,
     EF_USB_FRAME_COMPACT_BINARY = 3,
     EF_USB_FRAME_SUMMARY_BINARY = 4,
+    EF_USB_FRAME_GATEWAY_ACK_JSON = 5,
 } ef_usb_frame_type_t;
 
 typedef struct {

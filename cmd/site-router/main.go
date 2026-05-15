@@ -24,7 +24,7 @@ func run() error {
 	var (
 		dbPath       = flag.String("db", "site-router.db", "SQLite database path")
 		maxRetry     = flag.Int("max-retry", 3, "max outbound retry count before dead-letter")
-		op           = flag.String("op", "doctor", "operation: doctor|seed-fixtures|queue-metrics|ingest-fixture|issue-command|latest-state|command-state|pending-digest|pending-list|rebuild-latest-state")
+		op           = flag.String("op", "doctor", "operation: doctor|seed-fixtures|queue-metrics|queue-replan|ingest-fixture|issue-command|latest-state|command-state|pending-digest|pending-list|rebuild-latest-state")
 		fixturePath  = flag.String("fixture", "", "envelope fixture path for ingest-fixture")
 		seedFixtures = flag.Bool("seed-fixtures", false, "seed built-in manifest/lease fixtures before the operation")
 		ingressID    = flag.String("ingress-id", "local-cli", "ingress id for ingest-fixture")
@@ -66,6 +66,12 @@ func run() error {
 			return err
 		}
 		return printJSON(metrics)
+	case "queue-replan":
+		result, err := router.ReplanQueuedRoutes(ctx, *limit)
+		if err != nil {
+			return err
+		}
+		return printJSON(result)
 	case "ingest-fixture":
 		if *fixturePath == "" {
 			return fmt.Errorf("-fixture is required for op=%s", *op)

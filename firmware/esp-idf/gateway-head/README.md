@@ -8,6 +8,7 @@
 - LoRa RX を USB envelope frame として返す
 - startup / hop-buffered / ingress heartbeat を USB 側へ返す
 - heartbeat に USB/RF handoff counters と USB TX backpressure counter を載せる
+- USB frame type `5` の gateway ack JSON を返す
 - JP-safe LoRa profile を適用して起動する
 
 現段階の `usb_link` / `radio_hal_sx1262` は injectable runtime backend です。
@@ -55,7 +56,8 @@ real backend の現状:
 
 - USB 側は TinyUSB CDC-ACM を使う前提です
 - heartbeat の `usb_tx_ok` / `usb_tx_fail` / `usb_tx_backpressure` / `radio_tx_ok` / `radio_tx_fail` / `radio_rx_frames` / `usb_rx_frames` で handoff 状態を観測できます
-- `usb_dtr` は development backend では `n/a`、TinyUSB real backend では現時点 `unknown` として明示します。DTR line-state 自体は TinyUSB backend log に出ますが、共通 `usb_link` API へ未公開のため HIL で追加確認が必要です
+- `usb_dtr` は development backend では `n/a`、TinyUSB real backend では TinyUSB line-state callback から `true` / `false` を返します。DTR false 中の TinyUSB TX は backpressure として扱われます
+- gateway ack JSON は `status` に `gateway_accepted` / `radio_sent` / `radio_failed` を載せます。現時点では firmware/HIL smoke 用の最小 ack で、host 側の durable queue completion は別途 policy に合わせて扱います
 - radio 側は `Lora-net/sx126x_driver` を vendor し、HAL を `radio_hal_real_sx1262.c` で実装しています
 - まだこの workspace では `idf.py build` / HIL を回していないため、real backend は **prototype** 扱いです
 

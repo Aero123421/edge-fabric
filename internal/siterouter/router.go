@@ -395,6 +395,9 @@ func (r *Router) init(ctx context.Context) error {
 	if err := r.ensureOperationalSchema(ctx); err != nil {
 		return err
 	}
+	if err := r.runMigrations(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 

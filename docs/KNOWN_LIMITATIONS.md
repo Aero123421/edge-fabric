@@ -2,6 +2,11 @@
 
 現時点で明示しておくべき制約です。
 
+## Production claim boundary
+
+- `production` を release 値として明示的に claim していません。現状は `field-alpha` を前提に、実機 HIL・実キー provisioning・replay/sequence 防御・HSM/secure element 連携が完全ではないため、運用は限定モードです。
+- `docs/SECURITY.md` と運用ガイドは `field-alpha` 前提で読み替える前提です。実装追跡は `docs/KNOWN_LIMITATIONS.md` と [README の Not の項目](../README.md#what-it-is-not) とで一致しています。
+
 ## Firmware
 
 - `gateway-head` と `node-sdk` は binary on-air frame を使い始めた。CI smoke compile は構成済みだが、実機 USB CDC / 実 SX1262 driver の HIL はまだ未確認です

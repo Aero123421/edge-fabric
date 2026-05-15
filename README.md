@@ -134,13 +134,17 @@ Nix shell は Go / Python / pyserial / esptool / usbutils / jq / sqlite など�
 
 ## Quickstart
 
+`CI` とローカルで同じコマンドを回したい場合は [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) を参照してください。
+
 ### 1. Run the main checks
 
 PowerShell:
 
 ```powershell
 go test ./...
-go run .\cmd\edge-fabric doctor
+python -m pip install -e .
+python .\scripts\doctor.py
+python -m unittest discover -s tests -v
 go run .\cmd\sleepy-cycle-demo
 ```
 
@@ -148,7 +152,9 @@ Bash:
 
 ```bash
 go test ./...
-go run ./cmd/edge-fabric doctor
+python -m pip install -e .
+python ./scripts/doctor.py
+python -m unittest discover -s tests -v
 go run ./cmd/sleepy-cycle-demo
 ```
 
@@ -249,11 +255,22 @@ python .\scripts\export_clean_repo.py
 
 [要: ESP-IDF環境]
 
-```bash
-python ./scripts/doctor.py --require-go --require-idf
+```powershell
+cd .\firmware\esp-idf\gateway-head
+python ..\..\..\scripts\doctor.py --require-go --require-idf
 idf.py set-target esp32s3
 idf.py build
 ```
+
+```bash
+cd firmware/esp-idf/gateway-head
+python ../../../scripts/doctor.py --require-go --require-idf
+idf.py set-target esp32s3
+idf.py build
+cd -
+```
+
+`node-sdk` でも同様に app ディレクトリを切り替えて実行します。
 
 対象 app:
 

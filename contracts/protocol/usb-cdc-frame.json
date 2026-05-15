@@ -9,5 +9,32 @@
   ],
   "trailer_layout": [
     "payload_crc32_le[4]"
-  ]
+  ],
+  "frame_types": {
+    "1": {
+      "name": "fabric_envelope_json",
+      "direction": "host_to_gateway_or_gateway_to_host"
+    },
+    "2": {
+      "name": "gateway_heartbeat_json",
+      "direction": "gateway_to_host"
+    },
+    "3": {
+      "name": "compact_binary",
+      "direction": "host_to_gateway_or_gateway_to_host"
+    },
+    "4": {
+      "name": "summary_binary",
+      "direction": "host_to_gateway_or_gateway_to_host"
+    },
+    "5": {
+      "name": "gateway_ack_json",
+      "direction": "gateway_to_host",
+      "statuses": [
+        "gateway_accepted",
+        "radio_sent",
+        "radio_failed"
+      ]
+    }
+  }
 }

@@ -7,6 +7,7 @@ from pathlib import Path
 from edge_fabric.host.agent import (
     USB_FRAME_COMPACT_BINARY,
     USB_FRAME_FABRIC_ENVELOPE_JSON,
+    USB_FRAME_GATEWAY_ACK_JSON,
     USB_FRAME_GATEWAY_HEARTBEAT_JSON,
     USB_FRAME_SUMMARY_BINARY,
     HostAgent,
@@ -122,6 +123,21 @@ class HostAgentTests(unittest.TestCase):
         self.assertEqual(result.status, "heartbeat_recorded")
         self.assertEqual(self.agent.diagnostics()["spool_records"], 0)
         self.assertEqual(self.agent.diagnostics()["last_heartbeat"]["payload"]["gateway_id"], "gw-01")
+
+    def test_gateway_ack_frame_is_accepted_without_router_ingest(self) -> None:
+        frame = encode_frame(
+            USB_FRAME_GATEWAY_ACK_JSON,
+            b'{"status":"gateway_accepted","source_frame_type":3}',
+        )
+
+        result = self.agent.relay_usb_frame(
+            ingress_id="gateway-usb-ack",
+            session_id="ack-session-01",
+            frame=frame,
+        )
+
+        self.assertEqual(result.status, "gateway_accepted")
+        self.assertEqual(self.router.count_events(), 0)
 
     def test_encode_envelope_frame_uses_expected_frame_type(self) -> None:
         frame = self.agent.encode_envelope_frame(

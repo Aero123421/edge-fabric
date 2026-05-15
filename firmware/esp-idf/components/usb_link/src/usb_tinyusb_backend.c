@@ -37,17 +37,22 @@ typedef struct {
 
 static QueueHandle_t s_rx_queue;
 static volatile bool s_rx_queue_overflowed;
+static volatile bool s_dtr_asserted;
+static volatile bool s_rts_asserted;
 static bool s_tinyusb_driver_ready;
 static bool s_backend_installed;
 static portMUX_TYPE s_rx_overflow_lock = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE s_line_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void usb_tinyusb_rx_callback(int itf, cdcacm_event_t *event);
 static void usb_tinyusb_line_state_callback(int itf, cdcacm_event_t *event);
 static esp_err_t usb_tinyusb_backend_tx(const uint8_t *frame, size_t frame_len, void *context);
 static esp_err_t usb_tinyusb_backend_poll_rx(uint8_t *buf, size_t buf_cap, size_t *received_len, void *context);
+static esp_err_t usb_tinyusb_backend_get_line_state(bool *dtr, bool *rts, void *context);
 static bool usb_tinyusb_queue_rx_item(const usb_tinyusb_rx_item_t *item);
 static void usb_tinyusb_mark_overflow(void);
 static bool usb_tinyusb_consume_overflow(void);
+static void usb_tinyusb_store_line_state(bool dtr, bool rts);
 
 static esp_err_t usb_tinyusb_backend_ensure_ready(void) {
     if (s_backend_installed) {
@@ -84,6 +89,7 @@ esp_err_t usb_tinyusb_backend_install(void) {
     static const usb_link_backend_t backend = {
         .tx = usb_tinyusb_backend_tx,
         .poll_rx = usb_tinyusb_backend_poll_rx,
+        .get_line_state = usb_tinyusb_backend_get_line_state,
         .context = NULL,
         .name = "tinyusb-cdc-acm",
         .development_only = false,
@@ -153,18 +159,29 @@ static bool usb_tinyusb_consume_overflow(void) {
 }
 
 static void usb_tinyusb_line_state_callback(int itf, cdcacm_event_t *event) {
+    const bool dtr = event != NULL && event->line_state_changed_data.dtr;
+    const bool rts = event != NULL && event->line_state_changed_data.rts;
+    usb_tinyusb_store_line_state(dtr, rts);
     ESP_LOGI(
         TAG,
         "line state changed port=%d dtr=%d rts=%d",
         itf,
-        event->line_state_changed_data.dtr,
-        event->line_state_changed_data.rts);
+        dtr ? 1 : 0,
+        rts ? 1 : 0);
 }
 
 static esp_err_t usb_tinyusb_backend_tx(const uint8_t *frame, size_t frame_len, void *context) {
+    bool dtr = false;
+    bool rts = false;
     (void)context;
     if (frame == NULL || frame_len == 0u) {
         return ESP_ERR_INVALID_ARG;
+    }
+    ESP_RETURN_ON_ERROR(usb_tinyusb_backend_get_line_state(&dtr, &rts, NULL), TAG, "line state read failed");
+    (void)rts;
+    if (!dtr) {
+        ESP_LOGW(TAG, "host DTR is not asserted; treating USB TX as backpressure");
+        return ESP_ERR_TIMEOUT;
     }
     if (tinyusb_cdcacm_write_queue(TINYUSB_CDC_ACM_0, frame, frame_len) != frame_len) {
         return ESP_FAIL;
@@ -197,6 +214,32 @@ static esp_err_t usb_tinyusb_backend_poll_rx(uint8_t *buf, size_t buf_cap, size_
     memcpy(buf, item.data, item.length);
     *received_len = item.length;
     return ESP_OK;
+}
+
+static esp_err_t usb_tinyusb_backend_get_line_state(bool *dtr, bool *rts, void *context) {
+    (void)context;
+    if (dtr == NULL || rts == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    portENTER_CRITICAL(&s_line_state_lock);
+    *dtr = s_dtr_asserted;
+    *rts = s_rts_asserted;
+    portEXIT_CRITICAL(&s_line_state_lock);
+    return ESP_OK;
+}
+
+static void usb_tinyusb_store_line_state(bool dtr, bool rts) {
+    if (xPortInIsrContext()) {
+        portENTER_CRITICAL_ISR(&s_line_state_lock);
+        s_dtr_asserted = dtr;
+        s_rts_asserted = rts;
+        portEXIT_CRITICAL_ISR(&s_line_state_lock);
+        return;
+    }
+    portENTER_CRITICAL(&s_line_state_lock);
+    s_dtr_asserted = dtr;
+    s_rts_asserted = rts;
+    portEXIT_CRITICAL(&s_line_state_lock);
 }
 
 #else

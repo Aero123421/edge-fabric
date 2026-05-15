@@ -17,6 +17,7 @@ USB_FRAME_FABRIC_ENVELOPE_JSON = 1
 USB_FRAME_GATEWAY_HEARTBEAT_JSON = 2
 USB_FRAME_COMPACT_BINARY = 3
 USB_FRAME_SUMMARY_BINARY = 4
+USB_FRAME_GATEWAY_ACK_JSON = 5
 
 
 def _utcnow_iso() -> str:
@@ -86,6 +87,14 @@ class HostAgent:
             )
             return AgentRelayResult(
                 status="heartbeat_recorded",
+                ack=None,
+                spooled=False,
+                observation=observation,
+            )
+        if frame_type == USB_FRAME_GATEWAY_ACK_JSON:
+            ack_payload = json.loads(payload.decode("utf-8"))
+            return AgentRelayResult(
+                status=ack_payload.get("status") or "gateway_ack",
                 ack=None,
                 spooled=False,
                 observation=observation,

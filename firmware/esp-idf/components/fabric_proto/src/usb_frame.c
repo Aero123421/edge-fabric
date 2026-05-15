@@ -18,7 +18,8 @@ static bool ef_usb_frame_type_is_valid(uint8_t frame_type) {
     return frame_type == EF_USB_FRAME_ENVELOPE_JSON ||
            frame_type == EF_USB_FRAME_HEARTBEAT_JSON ||
            frame_type == EF_USB_FRAME_COMPACT_BINARY ||
-           frame_type == EF_USB_FRAME_SUMMARY_BINARY;
+           frame_type == EF_USB_FRAME_SUMMARY_BINARY ||
+           frame_type == EF_USB_FRAME_GATEWAY_ACK_JSON;
 }
 
 esp_err_t ef_usb_frame_validate(const uint8_t *frame, size_t frame_len) {

@@ -308,6 +308,25 @@ bool usb_link_backend_is_development_only(void) {
     return development_only;
 }
 
+esp_err_t usb_link_get_line_state(bool *dtr, bool *rts) {
+    usb_link_backend_t backend;
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (dtr == NULL || rts == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    backend = s_backend;
+    xSemaphoreGive(s_lock);
+    if (backend.get_line_state == NULL) {
+        *dtr = false;
+        *rts = false;
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    return backend.get_line_state(dtr, rts, backend.context);
+}
+
 static esp_err_t usb_link_queue_received_frame(const uint8_t *frame, size_t frame_len) {
     usb_link_frame_t item = {0};
     if (frame == NULL || frame_len == 0u || frame_len > sizeof(item.frame)) {

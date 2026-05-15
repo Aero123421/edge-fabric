@@ -14,13 +14,16 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "gateway_head";
+static const int64_t HEARTBEAT_INTERVAL_US = 5000000;
 static bool s_use_default_backends;
 static bool s_transport_initialized;
 static char s_gateway_id[32];
+static int64_t s_last_heartbeat_us;
 
 typedef struct {
     uint32_t usb_rx_frames;
@@ -36,6 +39,8 @@ static gateway_runtime_counters_t s_counters;
 
 static void gateway_head_runtime_task(void *arg);
 static esp_err_t gateway_send_heartbeat(const char *status, int extra_value);
+static void gateway_try_send_periodic_heartbeat(void);
+static void gateway_try_send_ack(const char *status, uint8_t source_frame_type, size_t payload_len, esp_err_t radio_err);
 static esp_err_t gateway_send_usb_frame(uint8_t frame_type, const uint8_t *payload, size_t payload_len);
 static esp_err_t gateway_send_radio_frame(const uint8_t *payload, size_t payload_len);
 static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len);
@@ -119,7 +124,14 @@ esp_err_t gateway_head_runtime_start(void) {
         radio_hal_backend_name(),
         usb_link_backend_is_development_only() ? "yes" : "no",
         radio_hal_backend_is_development_only() ? "yes" : "no");
-    ESP_RETURN_ON_ERROR(gateway_send_heartbeat("live", 0), TAG, "startup heartbeat failed");
+    {
+        const esp_err_t heartbeat_err = gateway_send_heartbeat("live", 0);
+        if (heartbeat_err == ESP_OK) {
+            s_last_heartbeat_us = esp_timer_get_time();
+        } else {
+            ESP_LOGW(TAG, "startup heartbeat deferred: %s", esp_err_to_name(heartbeat_err));
+        }
+    }
     if (xTaskCreate(gateway_head_runtime_task, "gateway_runtime", 4096, NULL, 5, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
@@ -169,6 +181,7 @@ esp_err_t gateway_head_runtime_poll_once(void) {
     } else if (err != ESP_ERR_TIMEOUT) {
         return err;
     }
+    gateway_try_send_periodic_heartbeat();
     return handled ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
@@ -192,7 +205,12 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
             if (!gateway_payload_is_json_object(payload, payload_len)) {
                 return ESP_ERR_INVALID_RESPONSE;
             }
-            ESP_RETURN_ON_ERROR(gateway_send_radio_frame(payload, payload_len), TAG, "LoRa TX failed");
+            gateway_try_send_ack("gateway_accepted", frame[3], payload_len, ESP_OK);
+            {
+                const esp_err_t radio_err = gateway_send_radio_frame(payload, payload_len);
+                gateway_try_send_ack(radio_err == ESP_OK ? "radio_sent" : "radio_failed", frame[3], payload_len, radio_err);
+                ESP_RETURN_ON_ERROR(radio_err, TAG, "LoRa TX failed");
+            }
             return gateway_send_heartbeat("hop_buffered", (int)payload_len);
         case EF_USB_FRAME_COMPACT_BINARY:
         case EF_USB_FRAME_SUMMARY_BINARY:
@@ -203,7 +221,12 @@ static esp_err_t gateway_handle_usb_frame(const uint8_t *frame, size_t frame_len
                     return ESP_ERR_INVALID_RESPONSE;
                 }
             }
-            ESP_RETURN_ON_ERROR(gateway_send_radio_frame(payload, payload_len), TAG, "LoRa TX failed");
+            gateway_try_send_ack("gateway_accepted", frame[3], payload_len, ESP_OK);
+            {
+                const esp_err_t radio_err = gateway_send_radio_frame(payload, payload_len);
+                gateway_try_send_ack(radio_err == ESP_OK ? "radio_sent" : "radio_failed", frame[3], payload_len, radio_err);
+                ESP_RETURN_ON_ERROR(radio_err, TAG, "LoRa TX failed");
+            }
             return gateway_send_heartbeat("hop_buffered", (int)payload_len);
         case EF_USB_FRAME_HEARTBEAT_JSON:
             ESP_LOGI(TAG, "heartbeat received from host");
@@ -273,6 +296,41 @@ static esp_err_t gateway_send_heartbeat(const char *status, int extra_value) {
         return ESP_ERR_INVALID_SIZE;
     }
     return gateway_send_usb_frame(EF_USB_FRAME_HEARTBEAT_JSON, (const uint8_t *)json, strlen(json));
+}
+
+static void gateway_try_send_periodic_heartbeat(void) {
+    const int64_t now_us = esp_timer_get_time();
+    if (s_last_heartbeat_us != 0 && now_us - s_last_heartbeat_us < HEARTBEAT_INTERVAL_US) {
+        return;
+    }
+    s_last_heartbeat_us = now_us;
+    (void)gateway_send_heartbeat("live", 0);
+}
+
+static void gateway_try_send_ack(const char *status, uint8_t source_frame_type, size_t payload_len, esp_err_t radio_err) {
+    char json[256];
+    int written = snprintf(
+        json,
+        sizeof(json),
+        "{\"gateway_id\":\"%s\",\"subject_kind\":\"gateway\",\"subject_id\":\"%s\",\"status\":\"%s\",\"source_frame_type\":%u,\"payload_len\":%u,\"radio_err\":%d,\"radio_tx_ok\":%lu,\"radio_tx_fail\":%lu}",
+        s_gateway_id,
+        s_gateway_id,
+        status != NULL ? status : "unknown",
+        (unsigned)source_frame_type,
+        (unsigned)payload_len,
+        (int)radio_err,
+        (unsigned long)s_counters.radio_tx_ok,
+        (unsigned long)s_counters.radio_tx_fail);
+    if (written <= 0 || (size_t)written >= sizeof(json)) {
+        ESP_LOGW(TAG, "gateway ack payload overflow");
+        return;
+    }
+    {
+        const esp_err_t err = gateway_send_usb_frame(EF_USB_FRAME_GATEWAY_ACK_JSON, (const uint8_t *)json, strlen(json));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "gateway ack send failed: %s", esp_err_to_name(err));
+        }
+    }
 }
 
 static esp_err_t gateway_send_usb_frame(uint8_t frame_type, const uint8_t *payload, size_t payload_len) {
@@ -347,10 +405,16 @@ static bool gateway_usb_tx_error_is_backpressure(esp_err_t err) {
 }
 
 static const char *gateway_usb_dtr_state(void) {
+    bool dtr = false;
+    bool rts = false;
     if (usb_link_backend_is_development_only()) {
         return "n/a";
     }
-    return "unknown";
+    if (usb_link_get_line_state(&dtr, &rts) != ESP_OK) {
+        return "unknown";
+    }
+    (void)rts;
+    return dtr ? "true" : "false";
 }
 
 static esp_err_t gateway_validate_onair_packet(const ef_onair_packet_t *packet) {

@@ -9,10 +9,12 @@
 typedef esp_err_t (*usb_link_tx_sink_t)(const uint8_t *frame, size_t frame_len, void *context);
 typedef esp_err_t (*usb_link_backend_tx_fn)(const uint8_t *frame, size_t frame_len, void *context);
 typedef esp_err_t (*usb_link_backend_poll_rx_fn)(uint8_t *buf, size_t buf_cap, size_t *received_len, void *context);
+typedef esp_err_t (*usb_link_backend_get_line_state_fn)(bool *dtr, bool *rts, void *context);
 
 typedef struct {
     usb_link_backend_tx_fn tx;
     usb_link_backend_poll_rx_fn poll_rx;
+    usb_link_backend_get_line_state_fn get_line_state;
     void *context;
     const char *name;
     bool development_only;
@@ -36,3 +38,4 @@ bool usb_link_has_delivery_path(void);
 bool usb_link_has_poll_path(void);
 const char *usb_link_backend_name(void);
 bool usb_link_backend_is_development_only(void);
+esp_err_t usb_link_get_line_state(bool *dtr, bool *rts);

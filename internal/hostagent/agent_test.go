@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Aero123421/edge-fabric/internal/protocol/onair"
 	"github.com/Aero123421/edge-fabric/internal/protocol/usbcdc"
@@ -178,6 +179,28 @@ func TestHeartbeatIsPersistedAndStoredForDiagnostics(t *testing.T) {
 	}
 	if diag["spool_records"].(int) != 0 {
 		t.Fatalf("expected no spool records, got %v", diag["spool_records"])
+	}
+}
+
+func TestGatewayAckFrameIsAcceptedWithoutRouterIngest(t *testing.T) {
+	agent, router := openAgentAndRouter(t)
+	frame, err := usbcdc.EncodeFrame(FrameGatewayAckJSON, []byte(`{"status":"gateway_accepted","source_frame_type":3}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.RelayUSBFrame(context.Background(), "gateway-usb-ack", "ack-session-01", frame, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "gateway_accepted" {
+		t.Fatalf("unexpected status: %s", result.Status)
+	}
+	count, err := router.CountEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expected gateway ack to skip router ingest, got %d events", count)
 	}
 }
 
@@ -629,6 +652,140 @@ func TestSummaryCommandResultUsesSummaryMetadata(t *testing.T) {
 	}
 	if envelope.Payload["codec_family"] != "summary_binary_v1" {
 		t.Fatalf("unexpected codec_family: %v", envelope.Payload["codec_family"])
+	}
+}
+
+func TestOutboundFakeTransportAckCompletesQueue(t *testing.T) {
+	agent, router := openAgentAndRouter(t)
+	envelope := outboundTestEnvelope("msg-egress-ack-001", "evt-egress-ack-001")
+	queueID, err := router.EnqueueOutbound(context.Background(), envelope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := NewFakeTransport(FakeTransportStep{
+		Result: &TransportResult{Status: TransportStatusAcked, Acked: true, AckPhase: "gateway_accepted"},
+	})
+	result, err := agent.DispatchOutboundOnce(context.Background(), fake, EgressConfig{
+		WorkerID:      "worker-egress-ack",
+		LeaseDuration: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Leased != 1 || result.Acked != 1 || len(result.Items) != 1 || result.Items[0].QueueID != queueID {
+		t.Fatalf("unexpected dispatch result: %+v", result)
+	}
+	metrics, err := router.QueueMetrics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics["acked_count"] != 1 {
+		t.Fatalf("expected acked_count=1, got metrics %+v", metrics)
+	}
+	attempts, err := router.ListOutboundAttempts(context.Background(), queueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Status != TransportStatusAcked || attempts[0].Detail["ack_phase"] != "gateway_accepted" {
+		t.Fatalf("unexpected attempts: %+v", attempts)
+	}
+	sent := fake.SentPackets()
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 fake packet, got %d", len(sent))
+	}
+	frameType, _, err := usbcdc.DecodeFrame(sent[0].WireFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frameType != FrameEnvelopeJSON {
+		t.Fatalf("expected envelope frame type, got %d", frameType)
+	}
+}
+
+func TestOutboundFakeTransportTemporaryFailureReturnsToQueued(t *testing.T) {
+	agent, router := openAgentAndRouter(t)
+	queueID, err := router.EnqueueOutbound(context.Background(), outboundTestEnvelope("msg-egress-retry-001", "evt-egress-retry-001"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := NewFakeTransport(FakeTransportStep{
+		Result: &TransportResult{Status: TransportStatusRetry, Retryable: true, Detail: map[string]any{"reason": "backpressure"}},
+	})
+	result, err := agent.DispatchOutboundOnce(context.Background(), fake, EgressConfig{
+		WorkerID:      "worker-egress-retry",
+		LeaseDuration: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Retrying != 1 || result.Items[0].Status != "retry" {
+		t.Fatalf("unexpected dispatch result: %+v", result)
+	}
+	metrics, err := router.QueueMetrics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics["queued_count"] != 1 || metrics["retry_count"] != 1 {
+		t.Fatalf("expected retry to return to queued, got metrics %+v", metrics)
+	}
+	attempts, err := router.ListOutboundAttempts(context.Background(), queueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Status != TransportStatusRetry {
+		t.Fatalf("unexpected attempts: %+v", attempts)
+	}
+}
+
+func TestOutboundFakeTransportPermanentFailureDeadLetters(t *testing.T) {
+	agent, router := openAgentAndRouter(t)
+	queueID, err := router.EnqueueOutbound(context.Background(), outboundTestEnvelope("msg-egress-dead-001", "evt-egress-dead-001"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := NewFakeTransport(FakeTransportStep{
+		Result: &TransportResult{
+			Status:           TransportStatusPermanentFailure,
+			PermanentFailure: true,
+			Detail:           map[string]any{"reason": "unsupported_bearer"},
+		},
+	})
+	result, err := agent.DispatchOutboundOnce(context.Background(), fake, EgressConfig{
+		WorkerID:      "worker-egress-dead",
+		LeaseDuration: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Dead != 1 || result.Items[0].Status != "dead" {
+		t.Fatalf("unexpected dispatch result: %+v", result)
+	}
+	metrics, err := router.QueueMetrics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics["dead_count"] != 1 || metrics["dead_reason_unsupported_bearer_count"] != 1 {
+		t.Fatalf("expected permanent failure dead-letter metrics, got %+v", metrics)
+	}
+	attempts, err := router.ListOutboundAttempts(context.Background(), queueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Status != TransportStatusPermanentFailure {
+		t.Fatalf("unexpected attempts: %+v", attempts)
+	}
+}
+
+func outboundTestEnvelope(messageID, eventID string) *contracts.Envelope {
+	return &contracts.Envelope{
+		SchemaVersion: "1.0.0",
+		MessageID:     messageID,
+		Kind:          "event",
+		Priority:      "critical",
+		EventID:       eventID,
+		Source:        contracts.SourceRef{HardwareID: "host-egress-test"},
+		Target:        contracts.TargetRef{Kind: "service", Value: "alerts"},
+		Payload:       map[string]any{"alarm_code": "egress_test"},
 	}
 }
 

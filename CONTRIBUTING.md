@@ -21,6 +21,8 @@ go test ./...
 go run .\cmd\site-router -op doctor
 ```
 
+CI 互換の最短コマンドも必要なら `docs/DEVELOPMENT.md` を確認してください。
+
 ### Python reference に触る場合
 
 ```powershell
@@ -32,6 +34,22 @@ python -m unittest discover -s tests -v
 ### ESP-IDF firmware に触る場合
 
 `ESP-IDF 5.2+` 環境で対象 app ディレクトリへ移動して、最低限 `idf.py build` を通してください。
+
+PowerShell:
+
+```powershell
+cd .\firmware\esp-idf\gateway-head
+python ..\..\..\scripts\doctor.py --require-go --require-idf
+idf.py set-target esp32s3
+idf.py build
+```
+
+```bash
+cd firmware/esp-idf/gateway-head
+python ../../../scripts/doctor.py --require-go --require-idf
+idf.py set-target esp32s3
+idf.py build
+```
 
 対象:
 

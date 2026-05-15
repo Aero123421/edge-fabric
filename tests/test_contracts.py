@@ -20,6 +20,12 @@ class ContractTests(unittest.TestCase):
     def _load_json(self, relative_path: str) -> dict:
         return json.loads((ROOT / relative_path).read_text(encoding="utf-8"))
 
+    def _security_docs_marker(self) -> dict:
+        docs = (ROOT / "docs" / "SECURITY.md").read_text(encoding="utf-8")
+        match = re.search(r"<!--\s*edge-fabric-security-policy:\s*(\{.*?\})\s*-->", docs)
+        self.assertIsNotNone(match, "docs security policy marker is required")
+        return json.loads(match.group(1))
+
     def test_fixture_envelopes_parse(self) -> None:
         for relative_path in (
             "contracts/fixtures/event-battery-alert.json",
@@ -90,6 +96,53 @@ class ContractTests(unittest.TestCase):
         encoded[3] = 2
         with self.assertRaises(ValueError):
             decode_frame(bytes(encoded))
+
+    def test_usb_cdc_frame_type_artifact_matches_hosts_and_firmware(self) -> None:
+        artifact = self._load_json("contracts/protocol/usb-cdc-frame.json")
+        go_source = (ROOT / "internal" / "hostagent" / "agent.go").read_text(encoding="utf-8")
+        py_source = (ROOT / "src" / "edge_fabric" / "host" / "agent.py").read_text(encoding="utf-8")
+        firmware_header = (
+            ROOT
+            / "firmware"
+            / "esp-idf"
+            / "components"
+            / "fabric_proto"
+            / "include"
+            / "fabric_proto"
+            / "fabric_proto.h"
+        ).read_text(encoding="utf-8")
+
+        expected = {
+            "1": ("FrameEnvelopeJSON", "USB_FRAME_FABRIC_ENVELOPE_JSON", "EF_USB_FRAME_ENVELOPE_JSON"),
+            "2": ("FrameHeartbeatJSON", "USB_FRAME_GATEWAY_HEARTBEAT_JSON", "EF_USB_FRAME_HEARTBEAT_JSON"),
+            "3": ("FrameCompactBinary", "USB_FRAME_COMPACT_BINARY", "EF_USB_FRAME_COMPACT_BINARY"),
+            "4": ("FrameSummaryBinary", "USB_FRAME_SUMMARY_BINARY", "EF_USB_FRAME_SUMMARY_BINARY"),
+            "5": ("FrameGatewayAckJSON", "USB_FRAME_GATEWAY_ACK_JSON", "EF_USB_FRAME_GATEWAY_ACK_JSON"),
+        }
+
+        def go_byte(name: str) -> int:
+            match = re.search(re.escape(name) + r"\s+byte\s*=\s*(\d+)", go_source)
+            self.assertIsNotNone(match, name)
+            return int(match.group(1))
+
+        def py_int(name: str) -> int:
+            match = re.search(re.escape(name) + r"\s*=\s*(\d+)", py_source)
+            self.assertIsNotNone(match, name)
+            return int(match.group(1))
+
+        def c_value(name: str) -> int:
+            match = re.search(rf"{re.escape(name)}\s*=\s*([^,\n]+)", firmware_header)
+            self.assertIsNotNone(match, name)
+            return int(match.group(1).strip())
+
+        self.assertEqual(set(artifact["frame_types"]), set(expected))
+        for key, (go_name, py_name, c_name) in expected.items():
+            with self.subTest(frame_type=key):
+                self.assertEqual(int(key), go_byte(go_name))
+                self.assertEqual(int(key), py_int(py_name))
+                self.assertEqual(int(key), c_value(c_name))
+        self.assertEqual(artifact["frame_types"]["5"]["name"], "gateway_ack_json")
+        self.assertIn("radio_sent", artifact["frame_types"]["5"]["statuses"])
 
     def test_ack_phase_artifact_stays_in_sync(self) -> None:
         artifact = self._load_json("contracts/protocol/ack-phases.json")
@@ -411,6 +464,20 @@ class ContractTests(unittest.TestCase):
         for profile in profiles["profiles"].values():
             for route_class in profile["default_routes"].values():
                 self.assertIn(route_class, routes["route_classes"])
+
+    def test_security_default_mode_is_consistent_between_contract_and_docs(self) -> None:
+        security_mode = self._load_json("contracts/policy/security-modes.json")
+        contract_default = security_mode["default_mode"]
+        self.assertEqual(self._security_docs_marker()["default_mode"], contract_default)
+
+    def test_dev_security_mode_is_explicit_opt_in(self) -> None:
+        security_mode = self._load_json("contracts/policy/security-modes.json")
+        self.assertEqual(security_mode["default_mode"], "field-alpha")
+        dev_policy = security_mode["modes"]["dev"]
+        self.assertIn("explicit", dev_policy["intended_use"].lower())
+        marker = self._security_docs_marker()
+        self.assertEqual(marker["dev_runtime_mode"], "delivery.ingress_metadata.runtime_mode=dev")
+        self.assertTrue(marker["dev_mode_opt_in"])
 
     def test_mesh_relay_route_classes_are_declared(self) -> None:
         routes = self._load_json("contracts/policy/route-classes.json")["route_classes"]

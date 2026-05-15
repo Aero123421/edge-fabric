@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	FrameEnvelopeJSON  byte = 1
-	FrameHeartbeatJSON byte = 2
-	FrameCompactBinary byte = 3
-	FrameSummaryBinary byte = 4
+	FrameEnvelopeJSON   byte = 1
+	FrameHeartbeatJSON  byte = 2
+	FrameCompactBinary  byte = 3
+	FrameSummaryBinary  byte = 4
+	FrameGatewayAckJSON byte = 5
 )
 
 const onairDuplicateWindow = 5 * time.Second
@@ -94,6 +95,17 @@ func (a *Agent) RelayUSBFrame(ctx context.Context, ingressID, sessionID string, 
 		}
 		envelope := heartbeatEnvelope(heartbeat)
 		return a.relayEnvelope(ctx, ingressID, sessionID, "usb_cdc", &observation, envelope)
+	}
+	if frameType == FrameGatewayAckJSON {
+		var ack map[string]any
+		if err := json.Unmarshal(payload, &ack); err != nil {
+			return nil, err
+		}
+		status, _ := ack["status"].(string)
+		if status == "" {
+			status = "gateway_ack"
+		}
+		return &RelayResult{Status: status, Observation: observation}, nil
 	}
 	if frameType == FrameCompactBinary || frameType == FrameSummaryBinary {
 		dedupeKey := onairDuplicateKey(frameType, payload)

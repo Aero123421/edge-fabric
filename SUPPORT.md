@@ -22,6 +22,7 @@
 - `gateway-head` の heartbeat `hop_buffered` は local handoff を意味し、actual radio TX completion や durable completion は意味しません
 - `node-sdk` は sleepy leaf の bounded downlink / tiny command 契約を優先しており、rich command や OTA 本体は maintenance path 前提です
 - `Wi-Fi mesh backbone`, `LoRa relay`, `hybrid routing`, `multi-domain` は GA ではなく段階実装中です
+- `production` を名乗れる release gate ではありません。理由は HIL / provisioning / anti-replay / key rotation / key revocation が未完了であるためで、現時点は `field-alpha` 前提の制約付き運用が前提です
 
 詳細な platform / feature ごとの状態は [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md) を参照してください。
 

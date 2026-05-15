@@ -1,9 +1,9 @@
 {
   "version": "1.0.0",
-  "default_mode": "dev",
+  "default_mode": "field-alpha",
   "modes": {
     "dev": {
-      "intended_use": "local development and compatibility smoke only",
+      "intended_use": "local development and compatibility smoke only (explicit opt-in)",
       "allow_legacy_lora_json": true,
       "allow_declared_lora_size_for_alpha": true,
       "require_binary_onair_for_lora": false,
